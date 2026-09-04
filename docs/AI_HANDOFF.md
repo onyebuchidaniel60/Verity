@@ -16,10 +16,10 @@ repository, Git state, and environment. The repository is the source of truth.
 
 | Item | Value |
 | --- | --- |
-| **Current phase** | PHASE 0 — Project Foundation (plan §7) |
-| **Current milestone** | **GATE 0 verification EXECUTED AND PASSED** (exact evidence in §13) |
-| **Overall status** | ✅ All Gate 0 criteria verified: contracts compile, 2/2 smoke tests pass, frontend builds, versions pinned, integration route identified. Awaiting user approval to close Gate 0. |
-| **Phases 1–9** | All NOT started. Do not proceed past Gate 0 without user approval. |
+| **Current phase** | PHASE 0 — Project Foundation (plan §7) — **COMPLETE, CHECKPOINTED** |
+| **Current milestone** | **GATE 0 PASSED (user-approved) + Phase 0 Git checkpoint created** (exact evidence in §13, commit hash in §14) |
+| **Overall status** | ✅ Phase 0 committed at `8180cb9`. Awaiting user approval to begin PHASE 1 — Independent STRK20 Proof. |
+| **Phases 1–9** | All NOT started. Do not begin Phase 1 without explicit user approval. |
 
 ## 2. What the previous agent actually completed
 
@@ -334,6 +334,25 @@ Removed all temporary verification artifacts: `wsl-check.txt`,
 `corepack-prepare.txt`, `scripts/_gate0_wsl.sh`, `scripts/_gate0_launch.sh`,
 `scripts/_probe.sh`, and a CR-suffixed junk file. `scripts/` contains only the
 five intended files.
+
+## 14. PHASE 0 GIT CHECKPOINT (2026-09-04)
+
+- **Commit:** `8180cb9` — `chore: establish verified project foundation`
+- **Tree:** 52 files changed, 7107 insertions(+), 13 deletions(-) — includes
+  canonical docs, continuity scaffolding (`AGENTS.md`, `.clinerules/`,
+  `docs/AI_HANDOFF.md`), Cairo workspace + both contract scaffolds, `apps/web`
+  shell, `pnpm-lock.yaml`, `Scarb.lock`, scripts, `strk20.json`.
+- **Pre-commit review:** staged list verified via `git add -A --dry-run` +
+  `git diff --cached --name-only` — no secrets/credentials/tokens (both
+  `.env.example` files contain only empty placeholders), no temp logs, no
+  build artifacts (`node_modules/`, `.next/`, `target/`, `.snfoundry_cache/`
+  all gitignored). Two review-capture txt files were caught and deleted
+  before staging.
+- **Post-commit verification:** `git status` clean (working tree);
+  `git log --oneline`: `8180cb9` ← `e64cc24` ← `8a3c40f`.
+- **Hygiene fix included:** `.gitignore` `.vscode` pattern corrected
+  (`.vscode/*` + `!.vscode/extensions.json`).
+- **Not pushed** — the commit is local only; push when the user directs.
 
 ## 12. Source references
 
