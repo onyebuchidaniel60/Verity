@@ -413,13 +413,66 @@ restore the committed versions.
   (`CLINE_IMPLEMENTATION_PLAN.md` §29 — PHASE 0 → GATE 0 → PHASE 1 → GATE 1).
   Do NOT start Phase 1 until approved.
 
+## 14.4 Phase 1 — START checkpoint (pre-implementation, 2026-09-04)
+
+- **Gate 1 PASSED by user (approval received 2026-09-04).** Beginning PHASE 1 —
+  Independent STRK20 proof (`CLINE_IMPLEMENTATION_PLAN.md` §8).
+- **Scope:** prove a genuine STRK20 operation *independently* of VERITY bounty
+  logic. No `FundBounty`, no `BountyManager`, no `VerityAnonymizer` (Phase 2+).
+  Per §37: real wallet + testnet, never a local mock.
+- **Environment audit (2026-09-04):** `node` v24.20.0 present.
+  - `npm`: blocked by PowerShell execution policy (Restricted); `pnpm`: not found.
+  - `scarb`/`snforge`: not on PATH → Cairo toolchain requires WSL (§3.2).
+  - STRK20 wallet key: **none** in env / no `.env.local` (`_envcheck.js`).
+- **Outcome:** PHASE 1 **FAILED (Gate 1 = NO)** — see §14.5.
+
+## 14.5 Phase 1 — RESULT checkpoint (2026-09-04)
+
+- **PHASE 1 FAILED.** Full report: `docs/phase1-failed.md` (committed as checkpoint).
+- **Why:** no funded STRK20 wallet / signing key available; PowerShell policy
+  blocks npm; `scarb` needs WSL. STRK20 rules (§31/§33) forbid simulating — no
+  fake tx hashes/balances/notes produced; no `scripts/strk20-proof.ts` written.
+- **Gate 1 — real STRK20 system?** NO (no operation performed: no wallet/sig to
+  submit a tx to the real Sepolia/mainnet pool).
+- **Per §32:** "PHASE 1 FAILED. STOP. Do not proceed to VERITY integration."
+  **No Phase 2 code written.**
+- **Verification performed:**
+  - `node _envcheck.js` → 0 strk/wallet env vars; no `.env.local`; scarb not on PATH.
+  - `node --version`→v24.20.0; `npm --version`→blocked; `which pnpm`→not found.
+- **Files changed:** `docs/AI_HANDOFF.md` (this file, §14.4–§14.5/§16/§17),
+  `docs/phase1-failed.md` (new). Temp `_envcheck.js` deleted before commit.
+- **Next step (blocked):** re-attempt Phase 1 once a real funded STRK20-capable
+  wallet (Ready/Argent X v6, Sepolia test STRK) + `npm`/`pnpm`/`starknet@10.5.0`
+  are available. **Awaiting user decision.**
+
 ## 16. Current state summary
 
 - Checkpoint chain (newest → oldest): `b540b82` → `b40ee8e` → `f7b2754` →
   `8180cb9` → `e64cc24` → `8a3c40f`.
-- Latest checkpoint commit: `b540b82`
-  (`docs: strengthen agent checkpoint and continuity rules`).
-- Tip of `main` == `origin/main` (verified live via `git ls-remote`); this handoff
-  update is committed as the new `HEAD` (see `git log`).
+- Latest checkpoint commit: `b540b82` (`docs: strengthen agent checkpoint and
+  continuity rules`) — pushed.
+- **Phase 1 FAILED (Gate 1 = NO)** — no funded STRK20 wallet available in this
+  environment. Per §32: *PHASE 1 FAILED. STOP. Do not proceed to VERITY
+  integration.* No Phase 2 work was written. Failure report committed at the
+  Phase 1 checkpoint (see §14.5).
 - Phase 0 foundation: complete & committed (`8180cb9`), pushed.
-- Next required action: user approval → implement PHASE 1 (Independent STRK20 proof).
+
+## 17. Status and STOP point
+
+- **Gate 0 PASSED, checkpointed, pushed (commit `8180cb9` + `b540b82`).** ✅
+- **Phase 1 attempted → FAILED (Gate 1 = NO).** No funded STRK20 wallet and no
+  wallet signing capability were available in this environment, so no real STRK20
+  operation could be performed. Per `CLINE_IMPLEMENTATION_PLAN.md` §32:
+  *"PHASE 1 FAILED. STOP. Do not proceed to VERITY integration."*
+- **I STOPPED at the Phase 1 gate.** No Phase 2 (VerityAnonymizer) code was
+  written, in strict accordance with §37 and the spec's Phase 1 STOP GATE.
+- **Honesty enforced:** no mock tx hashes / balances / notes /
+  `privacy_invoke` were produced. The environment constraint (no wallet) is the
+  true blocker, reported as-is.
+- **Re-attempt conditions:** (1) a real funded STRK20-capable wallet present on
+  Sepolia (Ready / Argent X v6), and (2) `npm`/`pnpm` installable with
+  `starknet@10.5.0`, and (3) Cairo toolchain via WSL. Awaiting user decision on
+  how to proceed (re-attempt vs. alternative path).
+- **Checkpoint for this session:** Phase 1 failure + `docs/phase1-failed.md`
+  report, committed and pushed as a checkpoint so re-attempts are explicit and
+  no Phase 2 work is smuggled past the gate.
