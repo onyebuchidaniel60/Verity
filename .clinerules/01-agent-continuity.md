@@ -7,9 +7,9 @@ These rules apply specifically to Cline working on VERITY.
 Before making any code change:
 
 1. Read `AGENTS.md`.
-2. Read `docs/AI\\\_HANDOFF.md`.
-3. Read `VERITY\\\_SPEC.md`.
-4. Read `CLINE\\\_IMPLEMENTATION\\\_PLAN.md`.
+2. Read `docs/AI\\\\\\\\\\\\\\\_HANDOFF.md`.
+3. Read `VERITY\\\\\\\\\\\\\\\_SPEC.md`.
+4. Read `CLINE\\\\\\\\\\\\\\\_IMPLEMENTATION\\\\\\\\\\\\\\\_PLAN.md`.
 5. Inspect the repository structure.
 6. Run `git status`.
 7. Inspect recent commits.
@@ -21,7 +21,7 @@ Do not begin coding before completing these steps.
 
 ## Handoff Discipline
 
-`docs/AI\\\_HANDOFF.md` is a live checkpoint.
+`docs/AI\\\\\\\\\\\\\\\_HANDOFF.md` is a live checkpoint.
 
 Update it:
 
@@ -41,7 +41,7 @@ If your context or quota may become exhausted, update the handoff before continu
 
 ## Phase Discipline
 
-Follow `CLINE\\\_IMPLEMENTATION\\\_PLAN.md` exactly.
+Follow `CLINE\\\\\\\\\\\\\\\_IMPLEMENTATION\\\\\\\\\\\\\\\_PLAN.md` exactly.
 
 Do not:
 
@@ -54,7 +54,7 @@ At every gate:
 
 1. Verify.
 2. Record evidence.
-3. Update `docs/AI\\\_HANDOFF.md`.
+3. Update `docs/AI\\\\\\\\\\\\\\\_HANDOFF.md`.
 4. Report.
 5. STOP when instructed.
 
@@ -117,6 +117,7 @@ Create meaningful commits only after the relevant verification succeeds.
 Never claim a commit proves functionality unless the required verification actually passed.
 
 \---
+
 ## Mandatory Git Checkpointing
 
 
@@ -143,7 +144,7 @@ The required sequence is:
 
 5\. Check for secrets, credentials, tokens, temporary files, and unintended generated artifacts.
 
-6\. Update `docs/AI\_HANDOFF.md` with:
+6\. Update `docs/AI\\\\\\\_HANDOFF.md` with:
 
 
 
@@ -161,7 +162,7 @@ The required sequence is:
 
 7\. Create a meaningful Git commit for the verified milestone.
 
-8\. Record the commit hash in `docs/AI\_HANDOFF.md`.
+8\. Record the commit hash in `docs/AI\\\\\\\_HANDOFF.md`.
 
 9\. Run `git status` and `git log` to verify the checkpoint.
 
@@ -219,11 +220,119 @@ Do not silently continue.
 
 
 
-Record the exact error, diagnose the smallest necessary fix, retry the commit, verify the commit hash, and update `docs/AI\_HANDOFF.md`.
+Record the exact error, diagnose the smallest necessary fix, retry the commit, verify the commit hash, and update `docs/AI\\\\\\\_HANDOFF.md`.
 
 
 
 Do not claim the milestone is checkpointed until the commit actually exists.
+
+## GitHub Push After Checkpoints
+
+
+
+After every successfully verified milestone, phase, or gate:
+
+
+
+1\. Update `docs/AI\\\_HANDOFF.md`.
+
+2\. Create the Git checkpoint commit.
+
+3\. Verify the commit.
+
+4\. Verify the configured GitHub remote and current branch.
+
+5\. Push the checkpoint to GitHub.
+
+6\. Verify the push succeeded.
+
+7\. Record the commit hash and remote push status in `docs/AI\\\_HANDOFF.md`.
+
+8\. If the project plan requires user approval before the next phase, STOP and wait for that approval.
+
+
+
+\### Mandatory sequence
+
+
+
+\*\*Verified milestone → handoff update → Git commit → commit verification → GitHub push → push verification → STOP/WAIT\*\*
+
+
+
+Do not wait for the user to ask for a push.
+
+
+
+\### Never force-push automatically
+
+
+
+Cline MUST NOT use `git push --force`, `git push --force-with-lease`, or rewrite remote history unless the user explicitly authorizes it.
+
+
+
+If the remote has diverged, inspect the situation first and use a safe non-destructive approach.
+
+
+
+\### Push failures
+
+
+
+If a push fails:
+
+
+
+\* Preserve the local commit.
+
+\* Do not delete or reset the committed work.
+
+\* Record the exact error in `docs/AI\\\_HANDOFF.md`.
+
+\* Diagnose the cause.
+
+\* Resolve the minimum necessary issue.
+
+\* Retry the push.
+
+\* Verify the remote checkpoint before continuing.
+
+
+
+If authentication cannot be resolved safely, report the exact blocker and STOP with the local checkpoint preserved.
+
+
+
+\### Quota exhaustion
+
+
+
+Do not wait until quota exhaustion to push.
+
+
+
+Push completed verified checkpoints proactively so that the latest stable project state exists on GitHub even if the current model disappears unexpectedly.
+
+
+
+\### Phase transition
+
+
+
+A successful GitHub push is a checkpoint, not permission to advance.
+
+
+
+The agent must distinguish:
+
+
+
+\* \*\*Checkpoint:\*\* commit + push — automatic after verified work.
+
+\* \*\*Phase advancement:\*\* requires explicit approval when the project plan says so.
+
+
 
 
 
@@ -231,7 +340,7 @@ Do not claim the milestone is checkpointed until the commit actually exists.
 
 If another model will continue:
 
-Update `docs/AI\\\_HANDOFF.md` with:
+Update `docs/AI\\\\\\\\\\\\\\\_HANDOFF.md` with:
 
 * current phase;
 * current milestone;

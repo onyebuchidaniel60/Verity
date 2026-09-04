@@ -8,7 +8,7 @@ Different agents may work on this repository at different times. A model may sto
 
 Therefore:
 
-> \*\*Never depend on conversational memory for project continuity. The repository must contain the information required for another agent to safely continue the work.\*\*
+> \\\\\\\*\\\\\\\*Never depend on conversational memory for project continuity. The repository must contain the information required for another agent to safely continue the work.\\\\\\\*\\\\\\\*
 
 The repository, its Git history, and its documentation are the source of truth.
 
@@ -19,9 +19,9 @@ The repository, its Git history, and its documentation are the source of truth.
 Before making changes, every AI coding agent MUST read:
 
 1. `AGENTS.md`
-2. `docs/AI\_HANDOFF.md`
-3. `VERITY\_SPEC.md`
-4. `CLINE\_IMPLEMENTATION\_PLAN.md`
+2. `docs/AI\\\\\\\_HANDOFF.md`
+3. `VERITY\\\\\\\_SPEC.md`
+4. `CLINE\\\\\\\_IMPLEMENTATION\\\\\\\_PLAN.md`
 5. Relevant documentation under `docs/`
 
 If `.clinerules/` exists and the agent is Cline, its rules must also be followed.
@@ -35,10 +35,10 @@ Do not begin implementation before completing this reading.
 Use the following hierarchy when determining what VERITY should do:
 
 1. **Actual repository state**
-2. `VERITY\_SPEC.md` — canonical product and technical specification
-3. `CLINE\_IMPLEMENTATION\_PLAN.md` — canonical implementation and verification plan
+2. `VERITY\\\\\\\_SPEC.md` — canonical product and technical specification
+3. `CLINE\\\\\\\_IMPLEMENTATION\\\\\\\_PLAN.md` — canonical implementation and verification plan
 4. Relevant project documentation under `docs/`
-5. `docs/AI\_HANDOFF.md` — current work state
+5. `docs/AI\\\\\\\_HANDOFF.md` — current work state
 6. Git history
 7. Agent assumptions
 
@@ -56,7 +56,7 @@ A new agent MUST assume that another agent may have stopped halfway through a ta
 
 Before continuing:
 
-1. Read `docs/AI\_HANDOFF.md`.
+1. Read `docs/AI\\\\\\\_HANDOFF.md`.
 2. Inspect `git status`.
 3. Inspect recent commits.
 4. Inspect the files referenced by the handoff.
@@ -73,7 +73,7 @@ Do NOT redo completed work unless verification shows that the previous work is i
 
 # 5\. Mandatory Handoff Checkpointing
 
-`docs/AI\_HANDOFF.md` is a live checkpoint.
+`docs/AI\\\\\\\_HANDOFF.md` is a live checkpoint.
 
 Agents MUST update it:
 
@@ -115,7 +115,7 @@ Preferred workflow:
 ```text
 Understand
     ↓
-Update AI\_HANDOFF.md
+Update AI\\\\\\\_HANDOFF.md
     ↓
 Implement
     ↓
@@ -123,7 +123,7 @@ Test
     ↓
 Verify
     ↓
-Update AI\_HANDOFF.md
+Update AI\\\\\\\_HANDOFF.md
     ↓
 Commit verified milestone
     ↓
@@ -137,6 +137,7 @@ Do not create misleading commits that claim functionality is complete when it ha
 Never use Git history as a substitute for understanding the current repository state.
 
 \---
+
 ## Git Checkpoint Rules
 
 
@@ -161,11 +162,11 @@ When a milestone, phase, or gate has been successfully verified:
 
 4\. Ensure no secrets, credentials, tokens, temporary files, or unintended generated artifacts are committed.
 
-5\. Update `docs/AI\_HANDOFF.md` with the completed milestone, verification evidence, current state, and next step.
+5\. Update `docs/AI\\\\\\\_HANDOFF.md` with the completed milestone, verification evidence, current state, and next step.
 
 6\. Create a Git commit containing the verified milestone.
 
-7\. Record the resulting commit hash in `docs/AI\_HANDOFF.md`.
+7\. Record the resulting commit hash in `docs/AI\\\\\\\_HANDOFF.md`.
 
 8\. Verify the commit with `git status` and `git log`.
 
@@ -213,7 +214,7 @@ A checkpoint commit represents work that has actually been verified. If required
 
 
 
-If a milestone is partially complete, update `docs/AI\_HANDOFF.md` to reflect the partial state and exact next step.
+If a milestone is partially complete, update `docs/AI\\\\\\\_HANDOFF.md` to reflect the partial state and exact next step.
 
 
 
@@ -227,7 +228,7 @@ If the Git commit fails:
 
 1\. Do not claim the milestone is fully checkpointed.
 
-2\. Record the exact Git error in `docs/AI\_HANDOFF.md`.
+2\. Record the exact Git error in `docs/AI\\\\\\\_HANDOFF.md`.
 
 3\. Diagnose and fix only the Git issue preventing the checkpoint.
 
@@ -236,6 +237,104 @@ If the Git commit fails:
 5\. Verify the resulting commit hash.
 
 6\. Do not advance to the next phase until the checkpoint exists, unless the user explicitly instructs otherwise.
+
+## GitHub Remote Backup Rules
+
+
+
+After successfully creating and verifying a Git checkpoint, push the checkpoint to the configured GitHub remote.
+
+
+
+Required sequence:
+
+
+
+1\. Verify the local commit exists.
+
+2\. Verify the correct GitHub remote with `git remote -v`.
+
+3\. Push the current branch to its configured upstream remote.
+
+4\. Verify the push succeeded.
+
+5\. Confirm the local branch and remote branch are synchronized.
+
+6\. Record the commit hash and push status in `docs/AI\\\_HANDOFF.md`.
+
+
+
+The normal completed-milestone sequence is:
+
+
+
+\*\*VERIFY → UPDATE HANDOFF → COMMIT → VERIFY COMMIT → PUSH → VERIFY PUSH → STOP/WAIT\*\*
+
+
+
+\### Push safety
+
+
+
+Before pushing:
+
+
+
+\* Never force-push unless explicitly authorized.
+
+\* Never rewrite published history merely to resolve a conflict.
+
+\* Never push secrets, credentials, API keys, private keys, `.env` files, or other sensitive material.
+
+\* Never push unrelated changes.
+
+\* Verify the destination remote and branch before pushing.
+
+
+
+If the remote branch has changes that are not present locally, do not blindly overwrite them. Inspect the divergence and determine the safest non-destructive resolution.
+
+
+
+\### Push failure
+
+
+
+If the commit succeeds but the push fails:
+
+
+
+1\. Do NOT undo or discard the local commit.
+
+2\. Record the exact push error in `docs/AI\\\_HANDOFF.md`.
+
+3\. Diagnose the failure.
+
+4\. Fix only the issue necessary to establish the remote backup.
+
+5\. Retry the push.
+
+6\. Verify the remote contains the checkpoint.
+
+7\. Do not claim the checkpoint is remotely backed up until the push is confirmed.
+
+
+
+If GitHub authentication or permissions prevent the push and cannot safely be resolved automatically, leave the verified local commit intact, document the exact blocker, and STOP.
+
+
+
+\### Phase approval
+
+
+
+Pushing the completed phase to GitHub does not constitute permission to begin the next phase.
+
+
+
+A phase may be fully committed and pushed while the agent still waits for explicit user approval to proceed.
+
+
 
 
 
@@ -273,7 +372,7 @@ Do NOT:
 * simulate private balances locally;
 * create fake privacy accounting;
 * pretend a normal public ERC20 transfer is private;
-* simulate `privacy\_invoke`;
+* simulate `privacy\\\\\\\_invoke`;
 * recreate STRK20 protocol types locally when the actual protocol type is required;
 * invent STRK20 APIs;
 * claim privacy based solely on application-side obfuscation;
@@ -289,7 +388,7 @@ Privacy claims must accurately reflect what STRK20 actually hides and what remai
 
 # 9\. VERITY Architecture Rules
 
-`VERITY\_SPEC.md` is the canonical definition of the VERITY product.
+`VERITY\\\\\\\_SPEC.md` is the canonical definition of the VERITY product.
 
 Do not redesign the product requirements without explicit user approval.
 
@@ -330,7 +429,7 @@ Do not change multiple architectural components simultaneously to "see what work
 
 # 11\. Phase Discipline
 
-When `CLINE\_IMPLEMENTATION\_PLAN.md` defines implementation phases and verification gates, agents MUST follow them.
+When `CLINE\\\\\\\_IMPLEMENTATION\\\\\\\_PLAN.md` defines implementation phases and verification gates, agents MUST follow them.
 
 Do not silently skip a phase.
 
@@ -340,7 +439,7 @@ At a verification gate:
 
 1. Perform the required verification.
 2. Record exact evidence.
-3. Update `docs/AI\_HANDOFF.md`.
+3. Update `docs/AI\\\\\\\_HANDOFF.md`.
 4. Report the result.
 5. Stop when the plan requires user approval.
 
@@ -372,7 +471,7 @@ Before changing a dependency:
 3. Check relevant official documentation.
 4. Determine what code/tests depend on it.
 5. Make the smallest justified change.
-6. Record important decisions in `docs/AI\_HANDOFF.md`.
+6. Record important decisions in `docs/AI\\\\\\\_HANDOFF.md`.
 
 \---
 
@@ -385,11 +484,11 @@ The next agent must be able to continue using:
 ```text
 AGENTS.md
 +
-docs/AI\_HANDOFF.md
+docs/AI\\\\\\\_HANDOFF.md
 +
-VERITY\_SPEC.md
+VERITY\\\\\\\_SPEC.md
 +
-CLINE\_IMPLEMENTATION\_PLAN.md
+CLINE\\\\\\\_IMPLEMENTATION\\\\\\\_PLAN.md
 +
 Git
 +
@@ -400,7 +499,7 @@ The new agent MUST verify the handoff rather than blindly trusting it.
 
 Recommended continuation instruction:
 
-> Continue VERITY from the current repository state. Read `AGENTS.md`, `docs/AI\_HANDOFF.md`, `VERITY\_SPEC.md`, and `CLINE\_IMPLEMENTATION\_PLAN.md` first. Inspect Git status, recent commits, and the files referenced by the handoff. Verify the documented state against the actual repository. Do not restart or redo completed work. Identify the exact point where the previous agent stopped and continue from the documented next step.
+> Continue VERITY from the current repository state. Read `AGENTS.md`, `docs/AI\\\\\\\_HANDOFF.md`, `VERITY\\\\\\\_SPEC.md`, and `CLINE\\\\\\\_IMPLEMENTATION\\\\\\\_PLAN.md` first. Inspect Git status, recent commits, and the files referenced by the handoff. Verify the documented state against the actual repository. Do not restart or redo completed work. Identify the exact point where the previous agent stopped and continue from the documented next step.
 
 \---
 
@@ -441,5 +540,5 @@ When blocked, report:
 
 The most important rule is:
 
-> \*\*Do not depend on the model's memory. Make the repository remember for it.\*\*
+> \\\\\\\*\\\\\\\*Do not depend on the model's memory. Make the repository remember for it.\\\\\\\*\\\\\\\*
 
