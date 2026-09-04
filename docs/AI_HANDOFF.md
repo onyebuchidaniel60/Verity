@@ -380,3 +380,46 @@ restore the committed versions.
 - Higher authority than this file: actual repository → `VERITY_SPEC.md` →
   `CLINE_IMPLEMENTATION_PLAN.md` → `docs/` → this handoff.
 - Full STRK20 research: `docs/STRK20_INTEGRATION.md`.
+
+---
+
+## 14.3 Continuity-rule checkpoint (2026-09-04)
+
+- **Commit:** `b540b82` — `docs: strengthen agent checkpoint and continuity rules`
+  (parent `b40ee8e`).
+- **Files changed:** `AGENTS.md` and `.clinerules/01-agent-continuity.md` only
+  (this resolves the §14.2 anomaly).
+- **Pre-commit review:** decoded the working-tree diff for these two files —
+  additions are rule text (Mandatory Git Checkpointing, the checkpoint sequence,
+  handoff-content minimums, GitHub push rules incl. non-force-push, model-switching
+  continuation instruction, checkpoint-vs-phase-advance distinction); the backslash
+  delta is cosmetic prose escaping in filename references. **No secrets, no
+  contract/frontend/script edits.**
+- **Pushed:** `git push origin main` (normal, non-force) → `b40ee8e..b540b82 main -> main`.
+- **Sync verified:** `git status -sb` → `## main...origin/main` (in sync);
+  local `main` = `origin/main` =
+  `b540b8238799984166125f9df443a38980ab7fee9`;
+  live `git ls-remote origin main` returns the same hash (GitHub holds it).
+
+## 15. STOP POINT / STATE FOR THE NEXT AGENT
+
+- Repository HEAD `main` = `b540b82`; `local main` == `origin/main` (verified
+  via live `git ls-remote`).
+- Working tree is otherwise clean: `AGENTS.md`/`.clinerules/01-agent-continuity.md`
+  are now committed (not modified); all temporary `.txt` verification captures
+  have been deleted.
+- Phase 0 GATE is PASSED and the checkpoint is pushed. **Awaiting explicit user
+  approval to begin PHASE 1 — Independent STRK20 proof**
+  (`CLINE_IMPLEMENTATION_PLAN.md` §29 — PHASE 0 → GATE 0 → PHASE 1 → GATE 1).
+  Do NOT start Phase 1 until approved.
+
+## 16. Current state summary
+
+- Checkpoint chain (newest → oldest): `b540b82` → `b40ee8e` → `f7b2754` →
+  `8180cb9` → `e64cc24` → `8a3c40f`.
+- Latest checkpoint commit: `b540b82`
+  (`docs: strengthen agent checkpoint and continuity rules`).
+- Tip of `main` == `origin/main` (verified live via `git ls-remote`); this handoff
+  update is committed as the new `HEAD` (see `git log`).
+- Phase 0 foundation: complete & committed (`8180cb9`), pushed.
+- Next required action: user approval → implement PHASE 1 (Independent STRK20 proof).
