@@ -352,7 +352,28 @@ five intended files.
   `git log --oneline`: `8180cb9` ← `e64cc24` ← `8a3c40f`.
 - **Hygiene fix included:** `.gitignore` `.vscode` pattern corrected
   (`.vscode/*` + `!.vscode/extensions.json`).
-- **Not pushed** — the commit is local only; push when the user directs.
+
+### 14.1 Pushed to GitHub (2026-09-04, user-directed)
+
+- Pre-push check: branch `main`; remote
+  `origin → https://github.com/onyebuchidaniel60/Verity.git`;
+  `main...origin/main [ahead 2]` with exactly `f7b2754` and `8180cb9`.
+- Push: `git push origin main` (normal, non-force) → `e64cc24..f7b2754 main -> main`.
+- Sync verified: `git status -sb` → `## main...origin/main` (no ahead/behind);
+  local `main` = `origin/main` = `f7b27540f4597bbe69f28d57bd4a2dc53cf14a07`;
+  live `git ls-remote origin main` returns the same hash (GitHub holds it).
+- The handoff update recording this push is itself committed and pushed
+  immediately after this section (see `git log` for its hash).
+
+### 14.2 Known working-tree anomaly (external, left untouched)
+
+After the Phase 0 commit, `AGENTS.md` and `.clinerules/01-agent-continuity.md`
+were modified by something outside this session (the file references gained
+extra backslash escaping, e.g. `docs/AI\____HANDOFF.md`; they now match the
+over-escaped text served in the session rules). Not committed, not reverted —
+pushes publish commits only, so this does not affect GitHub. The user/next
+agent should decide whether to commit the regenerated continuity files or
+restore the committed versions.
 
 ## 12. Source references
 
