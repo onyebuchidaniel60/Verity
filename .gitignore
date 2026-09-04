@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Builds
+dist/
+build/
+.next/
+out/
+
+# Cairo / Scarb / Snforge artifacts
+target/
+.snfoundry_cache/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs + temp
+*.log
+wsl-*.txt
+*.tgz
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+
+# Uncommitted scratch
+VERITY_phase0/scratch/

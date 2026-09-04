@@ -1,0 +1,41 @@
+# VERITY — Cairo workspace (single workspace root).
+#
+# Rationale for a single root-level workspace (adjustment of the layout shown
+# in the plan/spec, which also listed `contracts/Scarb.toml`):
+# Scarb, like Cargo, disallows a package from belonging to two workspaces, and
+# nested workspaces over the same members cause a "multiple workspace roots"
+# conflict. A single workspace at the repository root keeps `scarb build` /
+# `snforge test` working from anywhere in the repo. No architectural change is
+# intended — the two contract packages remain `contracts/bounty_manager` and
+# `contracts/verity_anonymizer`.
+#
+# Version pins mirror the official Starknet Privacy workspace
+# (starkware-libs/starknet-privacy, Scarb.toml @ main, inspected 2026-09-03)
+# so the anonymizer can add the `privacy` Cairo dependency in Phase 2 without
+# corelib/edition skew:
+#   - edition 2024_07
+#   - starknet (corelib) 2.17.0
+#   - snforge_std 0.63.0
+#   - assert_macros 2.17.0
+# (openzeppelin 3.0.0 is added the moment a dependency actually needs it.)
+
+[workspace]
+members = [
+    "contracts/bounty_manager",
+    "contracts/verity_anonymizer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024_07"
+
+[workspace.dependencies]
+starknet = "2.17.0"
+snforge_std = "0.63.0"
+assert_macros = "2.17.0"
+
+[workspace.tool.scarb]
+allow-prebuilt-plugins = ["snforge_std"]
+
+[scripts]
+test = "snforge test"

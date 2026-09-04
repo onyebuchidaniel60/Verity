@@ -1,0 +1,18 @@
+{
+  "name": "verity",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VERITY — private bounty & truth marketplace on Starknet, powered by genuine STRK20 privacy.",
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "build:web": "pnpm --filter @verity/web build",
+    "dev:web": "pnpm --filter @verity/web dev",
+    "typecheck:web": "pnpm --filter @verity/web exec tsc --noEmit",
+    "contracts:build": "scarb build",
+    "contracts:test": "scarb test",
+    "contracts:test:snforge": "snforge test"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,24 @@
+[package]
+name = "verity_anonymizer"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+
+[dependencies]
+starknet.workspace = true
+
+# The official `privacy` Cairo package (starkware-libs/starknet-privacy) that
+# defines privacy::objects::OpenNoteDeposit is added in Phase 2 together with
+# the privacy_invoke entrypoint, pinned to the same tag as the live pool.
+
+[dev-dependencies]
+snforge_std.workspace = true
+assert_macros.workspace = true
+
+[[target.starknet-contract]]
+sierra = true
+casm = true
+
+[scripts]
+test = "snforge test"
