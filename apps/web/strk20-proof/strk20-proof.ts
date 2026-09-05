@@ -29,15 +29,101 @@
  *
  * Official references (re-verified 2026-09-05):
  *  - strk20-by-example.org/starknet-wallet-api/{overview,starknet-js}.md
- *  - strk20-wallet-api agent skill (welttowelt/strk20-skills) worked snippets
+ *  - starknet-js.com/docs/next/guides/account/walletAccount/#with-get-starknet-v6
  *  - installed types: starknet@10.5.0 dist/index.d.ts + types-js 0.10.3
  */
 
 import { WalletAccountV6, walletV6 } from "starknet";
 import type { STRK20_ACTION, STRK20_BALANCE_ENTRY } from "starknet";
+import { createStore, type Store } from "@starknet-io/get-starknet-discovery";
 import type { WalletWithStarknetFeatures } from "@starknet-io/get-starknet-wallet-standard/features";
 import { STRK20 } from "../lib/strk20";
 import { createProvider, type VerityNetwork } from "../lib/starknet";
+
+/**
+ * Singleton Wallet Standard discovery store.
+ *
+ * Mirrors the pattern in apps/web/components/ConnectWallet.tsx which keeps a
+ * single store alive via useEffect and subscribes continuously. The previous
+ * implementation created a fresh store per connectWallet() call and then did
+ * `store.getWallets()` synchronously — that races the extension's async
+ * `wallet-standard:app-ready` → `wallet-standard:register-wallet` round-trip.
+ * If the extension had not yet injected or had not yet replied to the
+ * app-ready event, getWallets() returned [] and the first click failed while
+ * the second succeeded after the extension was ready — the observed
+ * intermittency.
+ *
+ * Keeping one store for the page lifetime ensures we observe the registration
+ * regardless of whether it happened before or after the first Connect click,
+ * and we avoid leaking listeners on every retry.
+ */
+let _singletonStore: Store | null = null;
+
+function getDiscoveryStore(): Store {
+  if (typeof window === "undefined") {
+    throw new Error("Browser only: the STRK20 Wallet API requires a browser wallet.");
+  }
+  if (_singletonStore) return _singletonStore;
+  _singletonStore = createStore({ eip1193Adapters: [] });
+  return _singletonStore;
+}
+
+/**
+ * Promise that resolves on the next Wallet-Standard wallet registration
+ * (or immediately with the current wallet list if one is already present).
+ *
+ * Includes a timeout so the UI never hangs forever — the previous version
+ * hung indefinitely when no wallet was present because the promise only
+ * resolved on success and never rejected.
+ */
+function waitForStrk20Wallet(store: Store, timeoutMs = 8000): Promise<WalletWithStarknetFeatures[]> {
+  const found = strk20Capable(store.getWallets());
+  if (found.length > 0) return Promise.resolve(found);
+  return new Promise<WalletWithStarknetFeatures[]>((resolve, reject) => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const unsub = store.subscribe((wallets) => {
+      const ok = strk20Capable(wallets);
+      if (ok.length > 0) {
+        if (timeoutId) clearTimeout(timeoutId);
+        unsub();
+        resolve(ok.slice());
+      }
+    });
+    timeoutId = setTimeout(() => {
+      unsub();
+      reject(
+        new Error(
+          "No STRK20-capable wallet detected via the Starknet Wallet Standard within " +
+            `${timeoutMs}ms. Install Ready (formerly Argent), enable it for this page, and reload. ` +
+            `If Ready X is installed, ensure it is enabled for this site and not blocked by another wallet extension.`,
+        ),
+      );
+    }, timeoutMs);
+  });
+}
+
+/**
+ * STRK20-capable wallet: a Wallet-Standard wallet that exposes the
+ * Starknet Wallet API (`wallet.api` / features["starknet:walletApi"]), and is
+ * NOT an eip1193-only provider such as MetaMask. Braavos (per
+ * docs/STRK20_INTEGRATION.md §7) lacks STRK20 support — it still appears as a
+ * Starknet wallet but will fail the supportedWalletApi >= 0.10.3 check later;
+ * we keep it in the candidate set and let feature-detection reject it with a
+ * precise error rather than silently hiding it.
+ */
+function strk20Capable(wallets: readonly WalletWithStarknetFeatures[]): WalletWithStarknetFeatures[] {
+  return wallets.filter((w) => {
+    if (w.name.toLowerCase().includes("metamask")) return false;
+    // Official Wallet Standard shape: wallet.features["starknet:walletApi"] exists
+    // when the wallet speaks the Starknet Wallet API. The previous "api" in w
+    // check is kept as a fallback for older wrappers, but features is the
+    // canonical signal.
+    const features = (w as unknown as { features?: Record<string, unknown> }).features;
+    const hasWalletApi = !!(features && "starknet:walletApi" in features);
+    const hasLegacyApi = "api" in (w as unknown as Record<string, unknown>);
+    return hasWalletApi || hasLegacyApi;
+  }) as WalletWithStarknetFeatures[];
+}
 
 /**
  * Starknet address type. starknet@10.5.0 declares `Address` locally (sourced
@@ -45,21 +131,6 @@ import { createProvider, type VerityNetwork } from "../lib/starknet";
  * it, so VERITY defines the identical alias here.
  */
 export type Address = string;
-
-/** Minimal shape of the wallet object a STRK20-capable extension injects at window.starknet. */
-export interface InjectedWallet {
-  id: string;
-  name: string;
-  version?: string;
-  requestAccounts(): Promise<Address[]>;
-  requestChainId?(): Promise<string>;
-}
-
-declare global {
-  interface Window {
-    starknet?: InjectedWallet;
-  }
-}
 
 /** STRK20 Wallet API version floor required for private actions (official: >= 0.10.3). */
 export const WALLET_API_MIN_VERSION = "0.10.3";
@@ -133,7 +204,19 @@ export function withdrawAction(
 ): STRK20_ACTION {
   return { type: "withdraw", token, amount, recipient };
 }
-/** Read the wallet injected by the extension and request an account connection. */
+/**
+ * Discover a STRK20-capable wallet via the Starknet Wallet Standard and request
+ * an account connection.
+ *
+ * Uses @starknet-io/get-starknet-discovery (createStore) — the same official
+ * discovery route used by apps/web/components/ConnectWallet.tsx — rather than
+ * the legacy window.starknet injection, which modern STRK20-capable browsers
+ * (Ready / formerly Argent) do not reliably expose with a requestAccounts() method.
+ *
+ * Deterministic: uses a singleton store (so the wallet-standard:app-ready handshake
+ * is not re-dispatched on every click) and a timeout-bounded wait for the wallet
+ * to register, rather than a synchronous getWallets() race.
+ */
 export async function connectWallet(): Promise<{
   wallet: WalletWithStarknetFeatures;
   address: Address;
@@ -144,32 +227,52 @@ export async function connectWallet(): Promise<{
   if (typeof window === "undefined") {
     throw new Error("Browser only: the STRK20 Wallet API requires a browser wallet.");
   }
-  const injected = window.starknet;
-  if (!injected) {
+  const store = getDiscoveryStore();
+  // Wait for the STRK20-capable wallet to register via wallet-standard. The
+  // singleton store was created once; this wait simply subscribes for the
+  // async registration event (or returns immediately if already present).
+  const strkWallets = await waitForStrk20Wallet(store);
+  // Deterministic selection: if multiple Starknet wallets are present (e.g.
+  // Ready + Braavos), prefer Ready/Argent which is known STRK20-capable. The
+  // previous code blindly picked [0] which could be a non-STRK20 wallet and
+  // then fail capability detection non-deterministically depending on array order.
+  const wallet: WalletWithStarknetFeatures =
+    strkWallets.find((w) => /ready|argent/i.test(w.name)) ?? strkWallets[0];
+  if (!wallet) {
     throw new Error(
-      "No Starknet wallet extension detected (window.starknet is undefined). " +
+      "No STRK20-capable wallet detected via the Starknet Wallet Standard. " +
         "Install Ready (formerly Argent), enable it for this page, and reload.",
     );
   }
-  if (typeof injected.requestAccounts !== "function") {
-    throw new Error("Injected wallet has no requestAccounts() — not wallet-API capable.");
-  }
-  const accounts = await injected.requestAccounts();
-  if (!accounts || accounts.length === 0) {
+  // Request accounts through the real Wallet API. The wallet prompts the user
+  // to approve the connection via the Wallet Standard protocol.
+  // This is separate from WalletAccountV6.connect (which uses standard:connect
+  // and primes the wrapper's internal #account for events). Both paths are
+  // valid; we use walletV6.requestAccounts here so connectWallet remains
+  // provider-agnostic, and createStrk20Account later calls WalletAccountV6.connect
+  // which internally does standardConnect. The double-authorization is harmless:
+  // the second call sees the already-authorized account and returns immediately
+  // without a second prompt.
+  const accounts = await walletV6.requestAccounts(wallet);
+  if (!accounts || (Array.isArray(accounts) && accounts.length === 0)) {
     throw new Error("Wallet returned no accounts. Unlock it or approve the connection.");
   }
-  // Chain verification uses the wallet's own requestChainId() — WalletAccountV6
-  // does not expose getChainId().
-  const chainId = injected.requestChainId ? await injected.requestChainId() : undefined;
-  // The injected object exposes the ERN-standard feature surface that the
-  // starknet.js Wallet API functions operate on.
-  const wallet = injected as unknown as WalletWithStarknetFeatures;
-  const first = accounts[0];
+  if (typeof accounts === "string") {
+    throw new Error("Wallet returned a single string account — not WalletAccountV6 compatible.");
+  }
+  // Chain ID via the wallet's own Wallet API call (WalletAccountV6 has no getChainId).
+  let chainId: string | undefined;
+  try {
+    chainId = String(await walletV6.requestChainId(wallet));
+  } catch {
+    chainId = undefined;
+  }
+  const first = Array.isArray(accounts) ? accounts[0] : (accounts as unknown as string);
   return {
     wallet,
     address: (first.startsWith("0x") ? first : `0x${first}`) as Address,
-    walletId: injected.id,
-    walletName: injected.name,
+    walletId: (wallet as unknown as { id?: string }).id ?? wallet.name,
+    walletName: wallet.name,
     chainId,
   };
 }
@@ -177,6 +280,10 @@ export async function connectWallet(): Promise<{
 /**
  * Feature-detect the STRK20 Wallet API on the connected wallet.
  * Official rule: never decide capability from a private-balance read.
+ * Checks wallet_supportedWalletApi >= 0.10.3 — the STRK20 capability floor.
+ * Note: wallet_supportedSpecs is the Starknet JSON-RPC spec version (e.g. 0.8)
+ * and must NOT be used to gate STRK20; the correct gate is the Wallet API
+ * version.
  */
 export async function detectStrk20Capability(
   wallet: WalletWithStarknetFeatures,
@@ -197,7 +304,9 @@ export async function createStrk20Account(
   // Note: WalletAccountV6 does not expose getChainId(); the chain is verified
   // at connect time from the wallet's requestChainId() (see connectWallet),
   // and every STRK20 action is wallet-mediated — the wallet only operates on
-  // the chain it is actually connected to.
+  // the chain it is actually connected to. This call internally does
+  // standardConnect which primes the wallet wrapper's internal #account state
+  // so that standard:events → subscribeWalletEvent bridging works.
   const account = await WalletAccountV6.connect(provider, wallet);
   return account;
 }

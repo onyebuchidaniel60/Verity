@@ -529,3 +529,95 @@ YES only once those real, signed, on-chain STRK20 operations are observed.
 - Note: `pnpm typecheck:web` via WSL takes 1–3 min (cold WSL + DrvFs); poll
   the report file rather than expecting inline output.
 - `scarb build` / `snforge test` still succeed (2/2).
+## 20. Takeover diagnosis + fix (2026-09-06) — intermittent Connect + NOT_REGISTERED
+**Takeover agent:** Muse Spark (inspect-only first, then minimal fix). Verified repo state vs handoff before editing.
+**Git pre-state:** branch `main` at `d3042eb` (`origin/main`), working tree had uncommitted diff in `apps/web/strk20-proof/strk20-proof.ts` (injected→Wallet Standard rename, plus a switch from `supportedWalletApi` to `supportedSpecs` and a per-call `createStore` with a hanging `waitFor` promise) + untracked `_run-tsc*` artifacts. No `next-env.d.ts` change after `pnpm install` repaired the symlink (verified `git status` now clean except the two intended proof files).
+
+### 20.1 Task 1 — Diagnose the intermittent Connect (10-point audit, evidence-backed)
+**Q1 How wallets are discovered:** At `d3042eb` the committed harness read `window.starknet` directly and called `injected.requestAccounts()` — the legacy injected-provider path. The uncommitted diff switched to `@starknet-io/get-starknet-discovery` `createStore()` (Wallet Standard). The intended canonical route per `apps/web/components/ConnectWallet.tsx:39-43` and starknet-js `WalletAccountV6` docs is the Wallet Standard `createStore` + `wallet-standard:app-ready` ↔ `wallet-standard:register-wallet` handshake.
+
+**Q2 Direct injected read vs Wallet Standard:** Yes — `d3042eb:apps/web/strk20-proof/strk20-proof.ts:144-173` did `window.starknet`. That path no longer works for Ready X (formerly Argent) which no longer reliably exposes `window.starknet` with `requestAccounts()`. The first reported failure `"Injected wallet has no requestAccounts() — not wallet-API capable."` is the direct symptom of this. The diff partially fixed it but introduced a new bug (see Q5).
+
+**Q3 Multiple wallet extensions causing provider-selection races:** Yes, possible. Bulk `getWallets()` can contain Ready + Braavos + MetaMask virtual wallet. `ConnectWallet.tsx:45` filters `!normalizeId(w.name).includes("metamask")` and passes `eip1193Adapters: []` to suppress the MetaMask virtual wallet. The harness retained `eip1193Adapters: []` (good) but the `strk20Capable` filter used `"api" in w` (legacy) instead of `features["starknet:walletApi"]`, and it blindly picked `strkWallets[0]` — order depends on injection timing, so with two Starknet wallets the selection is non-deterministic. After the fix the harness prefers `/ready|argent/i` when multiple candidates exist.
+
+**Q4 Whether Ready X registration is asynchronous:** Yes. `registerStandardWalletDiscovery` in `node_modules/.pnpm/@starknet-io+get-starknet-discovery@6.0.2/.../src/standard-wallet.ts:6-19` adds a listener for `wallet-standard:register-wallet` and *dispatches* `wallet-standard:app-ready`. Wallets listen for `app-ready` and *then* fire `register-wallet`; the callback runs async via the extension content script. This is not synchronous.
+
+**Q5 Whether code attempts to connect before Ready X has registered:** Yes — committed code called `window.starknet` synchronously. Diff code did `store.getWallets()` immediately after `createStore()`; since registration is async, that array is `[]` until the extension replies. The diff then `await waitForStrk20Wallet(store)` which *should* have waited, but the store was created fresh per `connectWallet()` call, so each click re-dispatched `app-ready`. If the extension had not yet injected its listener (cold start), the first click's `app-ready` was lost; the second click succeeded because the extension was ready — observed intermittency. Fixed by using a singleton store (one `app-ready` handshake is not re-dispatched on every click, and the store's `subscribe` accumulates late registrations).
+
+**Q6 Whether failed connection attempts leave stale wallet/account state:** Yes, partially. Failed attempts left `accountRef.current`/`wallet` unchanged but the per-call `Store` leaked its `subscribe` listener (never unsubscribed on error) and `waitForStrk20Wallet` had no timeout, so a never-registering wallet left the UI stuck on `busy=true` ("Waiting for the wallet…") forever, requiring a reload. The fix adds a timeout-bounded wait that unsubscribes on both success and timeout, and clears `busy` via `guard`.
+
+**Q7 Whether repeated button clicks can race multiple connection/discovery operations:** Yes. Although `page.tsx:58-62` disables buttons while `busy=true`, the hanging promise kept `busy=true` forever (see Q6), and a rapid double-click before `busy` was set could create two `Store` instances racing to dispatch `app-ready` and call `walletV6.requestAccounts` concurrently, leading to duplicate prompts and order-dependent selection. Singleton store + timeout eliminates the hang and the per-click leak.
+
+**Q8 Whether Wallet Standard wallet/account returned by discovery is retained correctly:** No — committed code cast `injected as unknown as WalletWithStarknetFeatures` (wrong object). Diff correctly retained the discovered `WalletWithStarknetFeatures` but still discarded it after `connectWallet` (page kept only `address` + later called `createStrk20Account` which re-discovered via `WalletAccountV6.connect`). Retention is now correct: `connectWallet` returns the exact discovered `wallet` object, and `createStrk20Account` uses that same object to build `WalletAccountV6` — no casting.
+
+**Q9 Whether WalletAccountV6 is constructed from the correct wallet/account:** Partially wrong before fix. Diff called `walletV6.requestAccounts(wallet)` *before* `WalletAccountV6.connect(provider, wallet)`. `WalletAccountV6.connect` internally calls `standardConnect` which is the Wallet Standard `standard:connect` flow that primes the wrapper's internal `#account` (required for `subscribeWalletEvent` bridging, per `starknet@10.5.0` docs `WalletAccountV6.connect` comment). Calling `requestAccounts` first is redundant and meant a second prompt in theory, though the second `connect` saw already-authorized state and returned immediately. After fix the double call is documented and harmless; the primary construction is now via the single `WalletAccountV6.connect` in `createStrk20Account`, matching `starknet-js.com/docs/next/guides/account/walletAccount/#with-get-starknet-v6`.
+
+**Q10 Whether get-starknet-wallet-standard APIs are being used correctly:** No — diff changed `walletV6.supportedWalletApi` (returns `API_VERSION[]`, e.g. `["0.10.3","0.7.2"]` observed on this page) to `walletV6.supportedSpecs` (returns Starknet JSON-RPC spec versions, e.g. `0.8`). The STRK20 capability floor is Wallet API `>=0.10.3`, not spec. The starter kit's `ConnectWallet` uses `supportedSpecs` for generic chain compatibility, but STRK20 gating must use `supportedWalletApi`. The fix reverts to `supportedWalletApi` and documents the distinction.
+
+### 20.2 Task 2 — Diagnose NOT_REGISTERED (separate per-operation analysis)
+All four operations share **one root cause** — not four separate bugs. Evidence from `@starknet-io/types-js@0.10.3` `dist/types/wallet-api/methods.d.ts:144-203` and `errors.d.ts:18-21`:
+
+- `wallet_strk20InvokeTransaction` (`Shield` deposit, `Transfer`, `Withdraw`) lists errors `... | NOT_REGISTERED (118) | ...` with comment: *"Registration into the pool is transparent — if the user is not registered, NOT_REGISTERED is returned."*
+- `wallet_strk20PrepareInvoke` same.
+- `wallet_strk20Balances` same.
+
+Exact mapping for this harness (`apps/web/strk20-proof/strk20-proof.ts`):
+1. **Shield** — `account.strk20InvokeTransaction([shieldAction])` → `wallet_strk20InvokeTransaction` `{actions:[{type:'deposit',token,amount}]}`. Param shape matches `STRK20_DEPOSIT_ACTION` exactly (verified against `components.d.ts:187-192`). Pool `0x0254a6b...` Sepolia is correct (live probe at `probe-result/readonly-probe-sepolia.json` shows `poolClassHash 0x7e2bbd...`, `88` ABI entries, `block 14583166`). Wallet object is the `WalletAccountV6` built from the discovered Ready X wallet (`walletId "Ready X"` observed). Wallet API version `["0.10.3","0.7.2"]` satisfies `>=0.10.3`, so the method exists. Still `NOT_REGISTERED` because the account has not yet joined the pool — this is a prerequisite state, not a param error.
+2. **Balances** — `account.strk20Balances([token])` → `wallet_strk20Balances` `{tokens:[token]}`. Same prerequisite.
+3. **Transfer** — `wallet_strk20InvokeTransaction` `{type:'transfer',token,amount,recipient}` with `amount` as felt hex from `toBaseUnits` — shape matches `STRK20_TRANSFER_ACTION` (`FELT | 'OPEN'`); correct. Still `NOT_REGISTERED`.
+4. **Withdraw** — `wallet_strk20InvokeTransaction` `{type:'withdraw',token,amount,recipient}` — matches `STRK20_WITHDRAW_ACTION`. Still `NOT_REGISTERED`.
+
+Checklist (Q1–Q11):
+- **Q1 Exact Wallet API method:** logged per button now via `console.info("[phase1-proof] shield -> wallet_strk20InvokeTransaction", {actions})` etc. All go to the three STRK20 methods above.
+- **Q2 Param shape:** matches `starknet@10.5.0` + `types-js@0.10.3` exactly — no invention.
+- **Q3 WalletAccount object:** `WalletAccountV6` constructed via `WalletAccountV6.connect(provider, discoveredWallet)` with `provider = RpcProvider("https://starknet-sepolia-rpc.publicnode.com")` matching `VERITY_NETWORKS.sepolia`. No stale object.
+- **Q4 Wallet API version:** Ready X advertises `["0.10.3","0.7.2"]` — STRK20 methods present.
+- **Q5 Registration/initialization required:** **Yes.** All three STRK20 methods error `NOT_REGISTERED` when the account is not yet registered. Registration is not code — it is a one-time wallet-side onboarding (Ready X: enable STRK20 / Privacy, create shielded account for Sepolia, often funded with Sepolia STRK to pay the ~4 STRK flat pool fee per private tx).
+- **Q6 Pool/token addresses correct for Sepolia:** Yes — Sepolia pool `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`, STRK `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d` — both re-verified live via `getClassAt` probe (pool deployed).
+- **Q7 Wallet must be registered with pool:** Yes — that is exactly what code 118 means.
+- **Q8 Shield requires public ERC20 approval:** Not the cause of `NOT_REGISTERED`. Shield does need an allowance (pool pulls STRK), but the wallet's `strk20InvokeTransaction` handles fee/approval UI internally; a missing approval would surface as a different error. Not applicable to this code 118.
+- **Q9 Balances method correct:** Yes — `strk20Balances` via `WalletAccountV6` delegates to `wallet_strk20Balances`.
+- **Q10 Action names match 0.10.3:** Yes — `deposit`/`transfer`/`withdraw`/`invoke` as per `components.d.ts:224-227`.
+- **Q11 Spec semantics changed:** No — `starknet-js@10.5.0` still implements `wallet_supportedSpecs` vs `wallet_supportedWalletApi` as separate calls, and the STRK20 methods above remain behind `wallet_supportedWalletApi >=0.10.3`. No semantic change detected in installed types or `starknet-js.com` WalletAccountV6 STRK20 docs.
+
+**Conclusion:** Intermittent Connect is a fixable code bug (singleton store + timeout + correct API). `NOT_REGISTERED` is **not** a code bug — it is the correct wallet response when the user has not completed STRK20 registration/onboarding for that Sepolia account. The harness now surfaces this with actionable UI text and console param logging instead of a raw code, and does not simulate any privacy.
+
+### 20.3 Fix applied (minimal, standards-compliant)
+**`apps/web/strk20-proof/strk20-proof.ts`** (193 lines changed, no dependency upgrades):
+- Singleton `getDiscoveryStore()` (reuses one `createStore({eip1193Adapters:[]})` per page lifetime, matching `ConnectWallet.tsx` `useEffect` pattern) — eliminates the per-click `app-ready` re-dispatch race (§20.1 Q5/Q7).
+- `waitForStrk20Wallet(store, 8000)` now timeout-bounded, unsubscribes on both success and timeout, rejects with explicit message — UI never hangs (§20.1 Q6).
+- `strk20Capable` now checks `features["starknet:walletApi"]` (canonical) with fallback to legacy `"api" in w`, and filters MetaMask — deterministic candidate set (§20.1 Q3/Q10).
+- Wallet selection prefers `/ready|argent/i` when multiple candidates exist — deterministic when Ready + Braavos are both present (§20.1 Q3).
+- **Capability detection reverted to `walletV6.supportedWalletApi`** (not `supportedSpecs`) with comment documenting why — correct gate for STRK20 `>=0.10.3` (§20.1 Q10).
+- `connectWallet` documentation updated to describe deterministic handshake; double-authorization (`requestAccounts` vs `WalletAccountV6.connect`/`standardConnect`) documented as harmless (second call returns immediately when already authorized) (§20.1 Q9).
+- No change to `STRK20_ACTION` shapes — they already match the spec (§20.2 Q2/Q10).
+
+**`apps/web/app/phase1-proof/page.tsx`**:
+- Added `formatWalletError` that detects `NOT_REGISTERED`/`118` and appends registration guidance (enable STRK20 in Ready X, fund Sepolia STRK, need ~4 STRK fee per private tx).
+- Added expanded NOT_REGISTERED help block listing which Wallet API call failed, required param shapes, pool/token addresses, and that registration is the gate.
+- Added `console.info` per operation logging exact `wallet_strk20*` call, `actions`, `token`, `amount`, `recipient`, `pool` — auditable param evidence (§20.2 Q1).
+- `busy` message extended to warn that proof generation is long-running (10–30s).
+
+### 20.4 Verification performed (evidence ═ build, not protocol)
+- `corepack pnpm install --frozen-lockfile --config.confirmModulesPurge=false` — **Done in 42.8s** (repaired broken `apps/web/node_modules/typescript` symlink that had blocked `pnpm exec tsc`).
+- `corepack pnpm --filter @verity/web exec tsc --noEmit` — **EXIT 0** (no errors). Previously via `corepack pnpm --filter @verity/web exec tsc --noEmit --skipLibCheck` also 0; now even without flag.
+- `corepack pnpm --filter @verity/web run build` — **Compiled successfully in 36.1s, TypeScript finished 12.1s, Generating static pages 4/4 in 1171ms**, routes `○ /`, `○ /_not-found`, `○ /phase1-proof` (identical to pre-fix build, no regression).
+- `git diff --stat` after build: only the two intended proof files (193 ins/43 del), no `next-env.d.ts` drift, no untracked `_tsc*` artifacts.
+- **Not verified:** real wallet Signed STRK20 ops on Sepolia (shield/transfer/withdraw) — still requires manual Ready X registration + signing, which the agent cannot perform. Gate 1 remains **NO** until that manual step succeeds. The intermittent Connect behavior and NOT_REGISTERED surfacing must be re-tested manually at `http://localhost:3000/phase1-proof` (open console, click Connect + detect once — should be deterministic, no second click needed; then Shield/Balances/etc should show either tx hashes or the guided NOT_REGISTERED message).
+
+### 20.5 Next step (exact)
+1. User manually tests `http://localhost:3000/phase1-proof` with a **registered** Ready X on Sepolia (STRK20 enabled, funded). Confirm Connect no longer needs a double-click, then confirm Shield/Balances/Transfer/Withdraw with real signatures. If Connect is still flaky, capture the exact error + `console.info` line + `store.getWallets()` snapshot.
+2. If NOT_REGISTERED persists, follow the in-page guidance: in Ready X, enable privacy/STRK20, create the Sepolia shielded account, fund it, reload. No code change bypasses registration.
+3. Once a real private Shield + private Balance read + private Transfer + Withdraw each return `transaction_hash` (linked to Sepolia Voyager), record the hashes in `strk20.json` and note them here — only then Gate 1 → YES.
+4. Do NOT start Phase 2 until Gate 1 is YES.
+
+### 20.6 Files changed (uncommitted → will be committed next)
+- `apps/web/strk20-proof/strk20-proof.ts` — deterministic discovery fix
+- `apps/web/app/phase1-proof/page.tsx` — NOT_REGISTERED guidance + logging
+- `docs/AI_HANDOFF.md` — this section
+
+### 20.7 Known issues / blockers
+- Gate 1 = **NO** (no real wallet-signed STRK20 operation has succeeded on Sepolia yet — registration prerequisite, not code defect).
+- Phase 2 = **NOT AUTHORIZED**.
+- pnpm symlink repair was required (see §20.4) — not a dependency upgrade.
+
