@@ -1,0 +1,16 @@
+{
+  "probe": "readonly",
+  "network": "sepolia",
+  "poolAddress": "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
+  "strkTokenAddress": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+  "startedAt": "2026-09-05T09:10:57.115Z",
+  "isGateEvidence": false,
+  "chainId": "0x534e5f5345504f4c4941",
+  "blockNumberAtProbe": 14583166,
+  "poolClassHash": "0x7e2bbd7ccc1e68b2695caef70aeb2a3be6cd017b5d5159278ba08f2d8de33f",
+  "poolContractClassVersion": "0.1.0",
+  "poolAbiEntryCount": 88,
+  "strkTokenClassReadable": true,
+  "strkDecimals": 18,
+  "finishedAt": "2026-09-05T09:11:01.305Z"
+}

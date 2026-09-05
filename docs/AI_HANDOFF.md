@@ -1,28 +1,21 @@
 # AI HANDOFF — VERITY Reconstructed State
-
 **Reconstructed:** 2026-09-04 (continuity reconstruction after the implementing
 agent was interrupted mid-Phase 0; no prior `AI_HANDOFF.md` was maintained).
 **Reconstruction method:** read `AGENTS.md`, `.clinerules/`, `VERITY_SPEC.md`,
 `CLINE_IMPLEMENTATION_PLAN.md`, all of `docs/`, then audited the actual
 repository, Git state, and environment. The repository is the source of truth.
-
 > NOTE: the continuity scaffolding also added `docs/AI HANDOFF — VERITY.md`
 > (a 166-byte placeholder saying reconstruction is required). It is now
 > superseded by THIS file. Do not rely on it.
-
 ---
-
 ## 1. Current phase / milestone / status
-
 | Item | Value |
 | --- | --- |
 | **Current phase** | PHASE 0 — Project Foundation (plan §7) — **COMPLETE, CHECKPOINTED** |
 | **Current milestone** | **GATE 0 PASSED (user-approved) + Phase 0 Git checkpoint created** (exact evidence in §13, commit hash in §14) |
 | **Overall status** | ✅ Phase 0 committed at `8180cb9`. Awaiting user approval to begin PHASE 1 — Independent STRK20 Proof. |
 | **Phases 1–9** | All NOT started. Do not begin Phase 1 without explicit user approval. |
-
 ## 2. What the previous agent actually completed
-
 1. Read the spec + plan; renamed the untracked spec files to canonical names:
    `VERITY — Technical Specification.md` → `VERITY_SPEC.md`,
    `VERITY — Cline Phased Implementation Plan.md` → `CLINE_IMPLEMENTATION_PLAN.md`.
@@ -54,11 +47,8 @@ repository, Git state, and environment. The repository is the source of truth.
    `pnpm-workspace.yaml`, `strk20.json` (empty manifest), root `.env.example`.
 10. **Started but did NOT complete:** WSL Cairo toolchain install (downloads
     began), `pnpm` global install, and the GATE 0 verification/report.
-
 ## 3. Files created/modified (complete inventory)
-
 > All are UNCOMMITTED. Only `README.md` is a modification of a tracked file.
-
 - Root: `VERITY_SPEC.md`, `CLINE_IMPLEMENTATION_PLAN.md` (renamed), `README.md`
   (rewritten), `LICENSE`, `.gitignore`, `.gitattributes`, `.env.example`,
   `package.json`, `pnpm-workspace.yaml`, `Scarb.toml`, `strk20.json`,
@@ -80,9 +70,7 @@ repository, Git state, and environment. The repository is the source of truth.
 - `scripts/`: `deploy.ts`, `fund.ts`, `payout.ts`, `verify.ts`,
   `setup-wsl-toolchain.sh`.
 - `tests/`: `bounty_manager/README.md`, `integration/README.md` (placeholders).
-
 ## 4. What IS verified (actually checked)
-
 - **Node.js v24.20.0** on Windows; **npm 11.19.0** (present as `npm.cmd`);
   **git 2.55.0**. Chocolatey + Docker + WSL Ubuntu-24.04 available.
 - **Git history:** branch `main` @ `e64cc24` (`origin/main`), only 2 commits
@@ -96,26 +84,19 @@ repository, Git state, and environment. The repository is the source of truth.
   binaries** → WSL chosen); Privacy SDK `0.14.3-rc.6`; canonical Cairo pins
   (edition `2024_07`, corelib `2.17.0`, `snforge_std 0.63.0`).
 - **File/implementation inventory** above is byte-accurate as of 2026-09-04.
-
 ---
-
 ## 5. Tests run & exact results
-
 > Superseded by §13 (Gate 0 executed 2026-09-04). Historical state before
 > verification: no builds/tests had ever been run. Now verified:
-
 - `scarb build` (repo root, WSL) — **exit 0**, both packages compile.
 - `snforge test` (workspace root) — **exit 0: 2 passed, 0 failed**.
 - `snforge test` per package — **exit 0, 1 passed / 1 passed**.
 - `pnpm install` — **Done in 2m 43.8s** (pnpm 10.34.5, 97 packages).
 - `pnpm --filter @verity/web run build` — **success** (Next.js 16.3.4).
-
 The two `tests/scaffold_test.cairo` files remain trivial `assert(2+2==4)`
 toolchain smoke tests. They prove the toolchain works — they are NOT evidence
 of VERITY functionality or STRK20 integration.
-
 ## 6. What is NOT verified (do not assume it works)
-
 - ❌ Any STRK20 protocol interaction (none attempted — correct for Phase 0;
   that is exactly PHASE 1's objective).
 - ❌ Pool addresses live re-verification (taken from official docs only;
@@ -123,12 +104,9 @@ of VERITY functionality or STRK20 integration.
 - ❌ `ConnectWallet.tsx` runtime behavior in a real browser/wallet (it
   type-checked and the app builds, but no wallet interaction was exercised).
 - ❌ Contract deployment on-chain (scaffold only; Phase 1+).
-
 ## 7. Known errors / blockers
-
 > Status after Gate 0 execution: the original blockers are RESOLVED or worked
 > around. Current state:
-
 1. **RESOLVED — WSL output flakiness.** Workaround proven: run WSL work via
    committed `.sh` scripts writing logs to `/mnt/c/...`, launched detached via
    `Start-Process wsl.exe ...` (survives the tool's foreground-command churn).
@@ -149,9 +127,7 @@ of VERITY functionality or STRK20 integration.
 5. **All Phase 0 work is still UNCOMMITTED.** Commit the Phase 0 milestone
    (including `pnpm-lock.yaml` and `Scarb.lock`) only after the user approves
    Gate 0.
-
 ## 8. Important architectural decisions already made
-
 - **Integration route:** Starknet Wallet API + VERITY-owned
   `VerityAnonymizer` (private-dapp route; plan §5 preferred order #2).
 - **Ownership split:** `BountyManager` = business logic only (no STRK20
@@ -169,11 +145,8 @@ of VERITY functionality or STRK20 integration.
   get-starknet discovery/wallet-standard 6.0.2, types-js 0.10.3.
 - **Frontend:** Next 16 / React 19 / TS / zustand; STRK20 wallet capability is
   feature-detected via `walletV6.supportedSpecs`, never via balance reads.
-
 ---
-
 ## 9. Suspicious / potentially incorrect items (audit findings)
-
 1. `.gitignore` line `.vscode/except .vscode/extensions.json` is an invalid
    pattern (intended: ignore `.vscode/*` except `extensions.json`). Minor.
 2. `ConnectWallet.tsx` API usage is modeled on the official starter kit but is
@@ -189,25 +162,19 @@ of VERITY functionality or STRK20 integration.
    `docs/VERITY — AI AGENT WORKFLOW.md` vs the referenced
    `docs/AGENT_WORKFLOW.md`. Documented; reconcile later if desired.
 6. `wsl-check.txt` at repo root is junk from the previous agent (gitignored).
-
 ## 10. Exact point where the previous agent stopped
-
 Mid-**Phase 0, at the GATE 0 verification step** (plan §GATE 0). Its last
 actions were: launch the WSL toolchain bootstrap in the background, issue
 `npm.cmd install -g pnpm@10.34.5`, and read `wsl-check.txt` (which contained
 only `===`, i.e., **no tool versions were captured**). It never confirmed the
 toolchain, never ran `scarb build` / `snforge test` / `pnpm install` /
 `pnpm build:web`, and never delivered the GATE 0 report or a commit.
-
 **Update 2026-09-04:** the takeover agent completed the interrupted GATE 0
 verification (evidence in §13). Gate 0 criteria all PASS. The Gate 0 report
 has been delivered; the project now awaits user approval before Phase 1.
-
 ## 11. Exact next implementation step
-
 **Awaiting user approval of the GATE 0 report.** Per plan §GATE 0
 ("Cline MUST WAIT for approval before Phase 1"):
-
 1. On approval: commit the Phase 0 milestone, e.g.
    `git add -A && git commit -m "Phase 0 foundation — scaffold, toolchain pins, STRK20 route research, Gate 0 verified"`
    (includes `pnpm-lock.yaml`, `Scarb.lock`; excludes gitignored artifacts).
@@ -216,45 +183,33 @@ has been delivered; the project now awaits user approval before Phase 1.
    balance read → private transfer → withdraw), verified with real
    transactions and recorded evidence. NO bounty logic, NO private funding,
    NO private payout in Phase 1.
-
 **Do NOT** start Phase 1 without explicit user approval.
 **Do NOT** implement bounty marketplace, private funding, or private payout.
-
 ## 13. GATE 0 VERIFICATION — EXECUTED (2026-09-04, exact evidence)
-
 All commands ran with the Cairo toolchain inside WSL Ubuntu-24.04 and Node on
 Windows. Long-running steps were launched detached and their output captured
 to log files; the temp logs and temp scripts were removed after the evidence
 was recorded.
-
 ### 13.1 Environment / versions (exact output)
-
 ```text
 $ scarb --version
 scarb 2.20.1 (dd18779a1 2026-08-21)
 cairo: 2.20.0 (https://crates.io/crates/cairo-lang-compiler/2.20.0)
 sierra: 1.9.3
 arch: x86_64-unknown-linux-gnu
-
 $ snforge --version
 snforge 0.63.0
-
 $ sncast --version
 sncast 0.63.0
-
 $ node --version          (Windows)
 v24.20.0
-
 $ corepack pnpm --version (Windows)
 10.34.5
 ```
-
 `scripts/setup-wsl-toolchain.sh` — **exit 0**; installed into
 `~/.local/bin` (scarb → `~/.scarb/bin/scarb`; snforge/sncast →
 `~/.starknet-foundry/starknet-foundry-v0.63.0-x86_64-unknown-linux-musl/bin/`).
-
 ### 13.2 Compilation — `scarb build` (repo root)
-
 ```text
     Compiling lib(bounty_manager) bounty_manager v0.1.0 (...)
     Compiling starknet-contract(bounty_manager) bounty_manager v0.1.0 (...)
@@ -263,11 +218,8 @@ $ corepack pnpm --version (Windows)
      Finished `dev` profile target(s) in 37 seconds
 [scarb build exit=0]
 ```
-
 ### 13.3 Tests — `snforge test`
-
 Workspace root (exit 0):
-
 ```text
 Collected 1 test(s) from bounty_manager package
 [PASS] bounty_manager_integrationtest::scaffold_test::foundation_assert_works
@@ -276,17 +228,13 @@ Collected 1 test(s) from verity_anonymizer package
 Tests summary: 2 passed, 0 failed, 0 ignored, 0 filtered out
 [snforge test root exit=0]
 ```
-
 Per-package re-runs (`contracts/bounty_manager`, `contracts/verity_anonymizer`):
 each exit 0, `1 passed, 0 failed`.
-
 ### 13.4 Frontend — install + build (Windows)
-
 ```text
 $ corepack pnpm install
 Packages: +97
 Done in 2m 43.8s using pnpm v10.34.5      (pnpm-lock.yaml created)
-
 $ corepack pnpm --filter @verity/web run build
 > @verity/web@0.1.0 build ... > next build
 ▲ Next.js 16.3.4 (Turbopack)
@@ -295,13 +243,10 @@ $ corepack pnpm --filter @verity/web run build
 ✓ Generating static pages using 3 workers (3/3) in 1028ms
 Route (app): ○ /   ○ /_not-found          (static prerender)
 ```
-
 First attempt `corepack pnpm run build:web` failed (`'pnpm' is not
 recognized`) because corepack shims are not enabled (EPERM, §7.4); resolved by
 invoking the package build directly.
-
 ### 13.5 Fixes made to make Gate 0 pass (all verified by re-run)
-
 1. `contracts/bounty_manager/src/bounty_manager.cairo` and
    `contracts/verity_anonymizer/src/verity_anonymizer.cairo`: replaced the
    legacy `#[abi(embed_v0)] #[generate_trait]` pattern — under Cairo 2.20 it
@@ -319,24 +264,18 @@ invoking the package build directly.
    test run).
 4. `apps/web/tsconfig.json`: Next.js added `.next/dev/types/**/*.ts` to
    `include` during the build (tool-managed; benign).
-
 ### 13.6 Files added by verification (commit-worthy)
-
 - `pnpm-lock.yaml` (workspace lockfile), `Scarb.lock` (Cairo lockfile).
 - `node_modules/`, `apps/web/.next/`, `contracts/*/target/`,
   `.snfoundry_cache/` are build artifacts (gitignored; do not commit).
-
 ### 13.7 Cleanup performed
-
 Removed all temporary verification artifacts: `wsl-check.txt`,
 `gate0-wsl-log.txt`, `pnpm-out.txt`, `pnpm-err.txt`, `pnpm-install.txt`,
 `web-build-out*.txt`, `web-build-err*.txt`, `npm-global-install.txt`,
 `corepack-prepare.txt`, `scripts/_gate0_wsl.sh`, `scripts/_gate0_launch.sh`,
 `scripts/_probe.sh`, and a CR-suffixed junk file. `scripts/` contains only the
 five intended files.
-
 ## 14. PHASE 0 GIT CHECKPOINT (2026-09-04)
-
 - **Commit:** `8180cb9` — `chore: establish verified project foundation`
 - **Tree:** 52 files changed, 7107 insertions(+), 13 deletions(-) — includes
   canonical docs, continuity scaffolding (`AGENTS.md`, `.clinerules/`,
@@ -352,9 +291,7 @@ five intended files.
   `git log --oneline`: `8180cb9` ← `e64cc24` ← `8a3c40f`.
 - **Hygiene fix included:** `.gitignore` `.vscode` pattern corrected
   (`.vscode/*` + `!.vscode/extensions.json`).
-
 ### 14.1 Pushed to GitHub (2026-09-04, user-directed)
-
 - Pre-push check: branch `main`; remote
   `origin → https://github.com/onyebuchidaniel60/Verity.git`;
   `main...origin/main [ahead 2]` with exactly `f7b2754` and `8180cb9`.
@@ -364,9 +301,7 @@ five intended files.
   live `git ls-remote origin main` returns the same hash (GitHub holds it).
 - The handoff update recording this push is itself committed and pushed
   immediately after this section (see `git log` for its hash).
-
 ### 14.2 Known working-tree anomaly (external, left untouched)
-
 After the Phase 0 commit, `AGENTS.md` and `.clinerules/01-agent-continuity.md`
 were modified by something outside this session (the file references gained
 extra backslash escaping, e.g. `docs/AI\____HANDOFF.md`; they now match the
@@ -374,17 +309,12 @@ over-escaped text served in the session rules). Not committed, not reverted —
 pushes publish commits only, so this does not affect GitHub. The user/next
 agent should decide whether to commit the regenerated continuity files or
 restore the committed versions.
-
 ## 12. Source references
-
 - Higher authority than this file: actual repository → `VERITY_SPEC.md` →
   `CLINE_IMPLEMENTATION_PLAN.md` → `docs/` → this handoff.
 - Full STRK20 research: `docs/STRK20_INTEGRATION.md`.
-
 ---
-
 ## 14.3 Continuity-rule checkpoint (2026-09-04)
-
 - **Commit:** `b540b82` — `docs: strengthen agent checkpoint and continuity rules`
   (parent `b40ee8e`).
 - **Files changed:** `AGENTS.md` and `.clinerules/01-agent-continuity.md` only
@@ -400,9 +330,7 @@ restore the committed versions.
   local `main` = `origin/main` =
   `b540b8238799984166125f9df443a38980ab7fee9`;
   live `git ls-remote origin main` returns the same hash (GitHub holds it).
-
 ## 15. STOP POINT / STATE FOR THE NEXT AGENT
-
 - Repository HEAD `main` = `b540b82`; `local main` == `origin/main` (verified
   via live `git ls-remote`).
 - Working tree is otherwise clean: `AGENTS.md`/`.clinerules/01-agent-continuity.md`
@@ -412,9 +340,7 @@ restore the committed versions.
   approval to begin PHASE 1 — Independent STRK20 proof**
   (`CLINE_IMPLEMENTATION_PLAN.md` §29 — PHASE 0 → GATE 0 → PHASE 1 → GATE 1).
   Do NOT start Phase 1 until approved.
-
 ## 14.4 Phase 1 — START checkpoint (pre-implementation, 2026-09-04)
-
 - **Gate 1 PASSED by user (approval received 2026-09-04).** Beginning PHASE 1 —
   Independent STRK20 proof (`CLINE_IMPLEMENTATION_PLAN.md` §8).
 - **Scope:** prove a genuine STRK20 operation *independently* of VERITY bounty
@@ -425,9 +351,7 @@ restore the committed versions.
   - `scarb`/`snforge`: not on PATH → Cairo toolchain requires WSL (§3.2).
   - STRK20 wallet key: **none** in env / no `.env.local` (`_envcheck.js`).
 - **Outcome:** PHASE 1 **FAILED (Gate 1 = NO)** — see §14.5.
-
 ## 14.5 Phase 1 — RESULT checkpoint (2026-09-04)
-
 - **PHASE 1 FAILED.** Full report: `docs/phase1-failed.md` (committed as checkpoint).
 - **Why:** no funded STRK20 wallet / signing key available; PowerShell policy
   blocks npm; `scarb` needs WSL. STRK20 rules (§31/§33) forbid simulating — no
@@ -444,9 +368,7 @@ restore the committed versions.
 - **Next step (blocked):** re-attempt Phase 1 once a real funded STRK20-capable
   wallet (Ready/Argent X v6, Sepolia test STRK) + `npm`/`pnpm`/`starknet@10.5.0`
   are available. **Awaiting user decision.**
-
 ## 16. Current state summary
-
 - Checkpoint chain (newest → oldest): `b540b82` → `b40ee8e` → `f7b2754` →
   `8180cb9` → `e64cc24` → `8a3c40f`.
 - Latest checkpoint commit: `b540b82` (`docs: strengthen agent checkpoint and
@@ -456,9 +378,7 @@ restore the committed versions.
   integration.* No Phase 2 work was written. Failure report committed at the
   Phase 1 checkpoint (see §14.5).
 - Phase 0 foundation: complete & committed (`8180cb9`), pushed.
-
 ## 17. Status and STOP point
-
 - **Gate 0 PASSED, checkpointed, pushed (commit `8180cb9` + `b540b82`).** ✅
 - **Phase 1 attempted → FAILED (Gate 1 = NO).** No funded STRK20 wallet and no
   wallet signing capability were available in this environment, so no real STRK20
@@ -473,6 +393,139 @@ restore the committed versions.
   Sepolia (Ready / Argent X v6), and (2) `npm`/`pnpm` installable with
   `starknet@10.5.0`, and (3) Cairo toolchain via WSL. Awaiting user decision on
   how to proceed (re-attempt vs. alternative path).
-- **Checkpoint for this session:** Phase 1 failure + `docs/phase1-failed.md`
-  report, committed and pushed as a checkpoint so re-attempts are explicit and
-  no Phase 2 work is smuggled past the gate.
+## 18. Phase 1 RE-ATTEMPT — START checkpoint (2026-09-05, user-authorized)
+- **User re-authorized Phase 1** after the WSL environment was fully verified:
+  `node 24.20.0`, `pnpm 10.34.5`, `scarb 2.20.1`, `snforge 0.63.0`, running in
+  Ubuntu-24.04 via `wsl.exe -d Ubuntu-24.04 -- bash -lic <script>`
+  (`/home/user/.local/bin` is on the interactive PATH). Repo `/mnt/.../verity`
+  is clean at `6ef649f`; `main` == `origin/main`.
+- **Prior Gate 1 = NO cause (confirmed):** no STRK20-capable signing wallet was
+  reachable from the execution environment, and the STRK20 rules forbid
+  simulation — so no real private operation could be submitted. This was an
+  environment/wallet availability blocker, not a code defect.
+- **Selected route (unchanged, confirmed against current official docs
+  2026-09-05):** Starknet Wallet API route (starknet.js `WalletAccountV6` +
+  `strk20InvokeTransaction`, `STRK20_ACTION`), wallet holds viewing keys/proofs.
+  Requires a user's STRK20-capable browser wallet (Ready/Argent X v6) signed in,
+  and funds on-device — this is a *manual* user action the agent cannot perform.
+- **Official addresses re-verified 2026-09-05** (strk20-by-example.org/contract-addresses):
+  Sepolia pool `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`,
+  Mainnet pool `0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a`
+  — both match `apps/web/lib/strk20.ts`. STRK token
+  `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`.
+- **Phase 1 plan of record (this re-attempt):**
+  1. Author `scripts/strk20-proof/` — a proof harness implementing the smallest
+     official Wallet-API flow: connect → `supportedSpecs` feature-detect → shield
+     → private balance → private transfer → unshield, using real `starknet@10.5.0`
+     types and real protocol addresses. No invented types/APIs; no fake evidence.
+  2. Verification feasible without a wallet: compile it with the real
+     `starknet@10.5.0` (`tsc --noEmit`); optionally a read-only Sepolia probe
+     (pool reachability/fee) labeled as NOT gate evidence.
+  3. STOP at the first unavoidable manual wallet/signing action and report the
+     exact required user action. Gate 1 cannot be answered YES until a real
+     wallet signs real private ops (shield/transfer/unshield) against the pool.
+- **Secret discipline:** no private keys, seed phrases, or viewing keys will be
+  written into the repo, sources, logs, or commits. The wallet-route harness
+  only talks to the user's connected wallet.
+- **Next step:** (completed — see §19 below; the remaining gate is the manual
+  wallet action in §19.4).
+The harness was placed at `apps/web/strk20-proof/` (NOT `scripts/strk20-proof/`
+as §18 originally stated) because it is browser-only, imports from
+`apps/web/lib/{strk20,starknet}`, and needs the web workspace's `node_modules`
+to resolve `starknet@10.5.0` for typechecking. This location is intentional and
+correct; the import paths and the isolated `tsconfig.json` reflect it.
+### Verified milestone: typecheck passes (EXIT=0)
+The harness typechecks clean against the real installed types:
+```
+pnpm typecheck:web  ->  pnpm --filter @verity/web exec tsc --noEmit
+result: EXIT=0 (no errors)
+```
+This is **compile-verification only** — it confirms the code uses the genuine
+`starknet@10.5.0` STRK20 Wallet API surface correctly; it is NOT runtime or
+protocol evidence. Compilation is not proof of STRK20 integration.
+Honest API-surface findings that shaped the harness (recorded so the next agent
+does not re-derive them):
+- `@starknet-io/types-js@0.10.3` (re-exported by starknet) defines the real
+  action shapes: `STRK20_DEPOSIT_ACTION {type:'deposit',token,amount}`,
+  `STRK20_TRANSFER_ACTION {type:'transfer',token,amount,recipient}`,
+  `STRK20_WITHDRAW_ACTION {type:'withdraw',token,amount,recipient}`,
+  unioned as `STRK20_ACTION`, and `STRK20_BALANCE_ENTRY {token,balance}`.
+- `starknet@10.5.0` does **not** re-export `Address` → harness exports
+  `type Address = string` locally.
+- `WalletAccountV6` has **no `getChainId()`** → chain verification uses the
+  wallet's `requestChainId()` instead.
+- Feature detection uses `walletV6.supportedWalletApi(wallet)` (returns the
+  wallet API version strings); capability requires `>= 0.10.3`.
+## 19. Phase 1 re-attempt — COMPLETED (implementation) checkpoint (2026-09-05)
+**Status: implementation & compile-verification complete. Gate 1 still = NO.**
+Real STRK20 operations require a manual wallet action the agent cannot perform
+(see "Exact manual action required" below).
+### 19.1 Files created (all UNCOMMITTED as of this checkpoint)
+| File | Purpose |
+| --- | --- |
+| `apps/web/strk20-proof/strk20-proof.ts` | Phase 1 proof harness: connect → `supportedWalletApi` feature-detect → shield → `strk20Balances` → private transfer → withdraw. Browser-only; real installed types; fixed-shape `Phase1Evidence`; throws on wallet absence/rejection — no simulation. |
+| `apps/web/strk20-proof/tsconfig.json` | Isolated typecheck config (extends web tsconfig; `include: ["*.ts"]`). |
+| `apps/web/strk20-proof/readonly-probe.cjs` | Read-only Sepolia probe: `getClassHashAt`/`getClassAt` on the pool + STRK `decimals` call. Explicitly NOT gate evidence. |
+| `apps/web/app/phase1-proof/page.tsx` | Dev-only runner page (NOT the Phase 6 product UI): step buttons + "Run full flow" + raw evidence JSON + Sepolia Voyager tx links. |
+| `probe-result/readonly-probe-sepolia.json` | Real on-chain probe result (see §19.3). |
+The previous §18 note "Author `scripts/strk20-proof/`" is superseded by the
+`apps/web/strk20-proof/` location (see note at top of §18).
+### 19.2 Verification performed (real evidence)
+1. **Typecheck (compile-verification):** `tsc --noEmit` via the web workspace →
+   `EXIT=0`. Confirms correct use of the real STRK20 Wallet API surface. Not
+   runtime/protocol evidence.
+2. **Read-only Sepolia probe (real on-chain, NOT gate evidence):** executed
+   against `https://starknet-sepolia-rpc.publicnode.com`. Result recorded in
+   `probe-result/readonly-probe-sepolia.json`:
+   - `chainId`: `0x534e5f535345504f4c4941` (SN_SEPOLIA) ✓
+   - `blockNumberAtProbe`: `14583166` (live) ✓
+   - **Pool DEPLOYED** at the pinned address
+     `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`:
+     `poolClassHash` `0x7e2bbd7ccc1e68b2695caef70aeb2a3be6cd017b5d5159278ba08f2d8de33f`,
+     `poolContractClassVersion` `0.1.0`, `poolAbiEntryCount` `88` ✓
+   - STRK token class readable; `strkDecimals` `18` ✓
+   - `isGateEvidence`: **false** (read-only probe, by design).
+This reconfirms the pinned addresses are live and the pool class is deployed,
+satisfying docs/STRK20_INTEGRATION.md §9.8's "reconfirm live on-chain" step — but
+a read-only probe can never answer Gate 1.
+### 19.3 Honesty statement
+- No fake/simulated STRK20 operations, balances, notes, proofs, tx hashes, or
+  `privacy_invoke` were produced. No invented APIs or protocol types.
+- Gate 1 = **NO**: no real wallet-signed STRK20 operation
+  (shield/transfer/unshield) was submitted, because that requires a manual user
+  action the agent cannot perform. This is an environment/wallet blocker, not a
+  code defect.
+- The harness throws rather than fabricating evidence if the wallet is absent
+  or rejects a step.
+- No private keys, seed phrases, or viewing keys were written into the repo,
+  sources, logs, or commits. The wallet-route harness only talks to the user's
+  connected browser wallet.
+### 19.4 Exact manual action required (the genuine STOP point)
+To convert Gate 1 from NO → YES, **you** must run the harness against your real
+funded STRK20-capable Sepolia wallet:
+1. Start the web app: `pnpm dev:web` (or `pnpm --filter @verity/web dev`).
+2. Open the browser to the `/phase1-proof` route.
+3. Connect a STRK20-capable wallet (Ready / formerly Argent) funded with
+   Sepolia STRK, and approve the connection prompt.
+4. Either click the numbered steps in order (Connect → Shield → Balances 
+   → Transfer → Withdraw) or click **"Run full flow"**, approving each wallet
+   signing prompt.
+5. The page records a fixed-shape `Phase1Evidence` object (real transaction
+   hashes + real `strkBalances` responses only) and links each tx to Sepolia
+   Voyager.
+Each private operation (shield/transfer/withdraw) requires you to **sign a real
+STRK20 transaction in the wallet** — the agent cannot do this. Gate 1 becomes
+YES only once those real, signed, on-chain STRK20 operations are observed.
+**Agent STOP point: here.** Do not begin Phase 2.
+### 19.5 Re-usable environment note (WSL)
+- The verified, reliable WSL invocation is
+  `wsl.exe -d Ubuntu-24.04 -- bash -lc '<single command>'` (login,
+  **non-interactive**). `bash -lic` (interactive) fails nondeterministically on
+  non-TTY stdin and was the source of earlier "no output" failures.
+- A generic runner `c:\Users\User\AppData\Local\Temp\verity-run.js` exists:
+  it runs any command via `child_process` (so shell metacharacters never reach
+  the Windows `cmd` parser) and writes a UTF-8 report file. Invoke as:
+  `wsl.exe -d Ubuntu-24.04 -- bash -lc 'node /mnt/c/Users/User/AppData/Local/Temp/verity-run.js <reportPath> <cmd...>'`.
+- Note: `pnpm typecheck:web` via WSL takes 1–3 min (cold WSL + DrvFs); poll
+  the report file rather than expecting inline output.
+- `scarb build` / `snforge test` still succeed (2/2).
