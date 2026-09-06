@@ -765,4 +765,72 @@ Each hash must be a real on-chain Sepolia hash verifiable at `https://sepolia.vo
 - `contracts/verity_anonymizer/src/verity_anonymizer.cairo` — Milestone 2.0 boundary
 - `contracts/verity_anonymizer/tests/anonymizer_test.cairo` — 8 new tests
 - `docs/AI_HANDOFF.md` — this §23
+## 24. MILESTONE 2.1 PRE-DEPLOYMENT — compatibility + Sepolia proof prep (2026-09-06)
+**Status:** Milestone 2.0 locally verified at `2214244`. No privacy revision change — pinned `privacy` at `bc75e4bac71ad0ce10c6e63effc33b5b25131a4f` retained per instruction.
+
+**1. Final compatibility verification (before deployment):**
+- **Pinned privacy package:** `Scarb.toml:37` `privacy = { git = "https://github.com/starkware-libs/starknet-privacy.git", rev = "bc75e4bac71ad0ce10c6e63effc33b5b25131a4f" }`, resolved in `Scarb.lock` as `privacy 0.1.0` from git `bc75e4b` (same commit inspected for `objects.cairo:129` `OpenNoteDeposit` and `utils.cairo:84` `INVOKE_SELECTOR`). Workspace edition `2024_07`, `starknet 2.17.0`, `snforge_std 0.63.0` match that `privacy` workspace — no corelib skew.
+- **VerityAnonymizer contract:** `contracts/verity_anonymizer/src/verity_anonymizer.cairo:28-41` interface `IVerityAnonymizer { privacy_invoke(operation, nonce, note_id) -> Span<OpenNoteDeposit> }` — selector is `selector!("privacy_invoke")` = `0x402925cce9218828b3ac9a72ac249103f8448a1e1d73c3efaf5da992625043` as seen in compiled artifact `target/dev/verity_anonymizer_VerityAnonymizer.contract_class.json` (`abi` entry `privacy_invoke`, `entry_points_by_type.EXTERNAL` selector `0x4029...25043`). Return type is exactly `Span<privacy::objects::OpenNoteDeposit>` (`abi` `struct privacy::objects::OpenNoteDeposit` with `note_id, token, amount`). Constructor `constructor(pool: ContractAddress)` (`abi` constructor `pool: ContractAddress`). No invented ABI.
+- **Deployed Sepolia pool:** `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91` (pinned in `apps/web/lib/strk20.ts` and `docs/STRK20_INTEGRATION.md:4`). Pre-verified live in `probe-result/readonly-probe-sepolia.json` (classHash `0x7e2bbd...`, 88 ABI entries, block `14583166`) and re-checked now via `Scarb.lock` privacy that pool's `INVOKE_SELECTOR` (`selector!("privacy_invoke")`) is the same `0x4029...` selector our contract exposes — therefore pool's `_apply_invoke_and_deposits` (`privacy.cairo:891` with `selector: INVOKE_SELECTOR`) will correctly dispatch to our `privacy_invoke` and then `deserialize_invoke_return_data` will correctly parse our `Span<OpenNoteDeposit>`. Empty `Span` is valid when no open notes were created (verified in `privacy.cairo:880-950` `if !deposits.is_empty() { ... } assert(undeposited_open_notes==0)`).
+- **Conclusion:** Pinned `privacy` rev `bc75e4b` + `VerityAnonymizer` `privacy_invoke`/`OpenNoteDeposit` + deployed Sepolia pool `0x0254...` are mutually compatible. No revision upgrade performed.
+
+**2. Build verification (before deployment, as required):**
+- `wsl scarb build` — **Finished `dev` 3s** (same as §23, warnings only for profile overrides, no errors). Class `verity_anonymizer_VerityAnonymizer` at `target/dev/verity_anonymizer_VerityAnonymizer.contract_class.json` ready.
+- `wsl snforge test` — **10 passed, 0 failed** (verity_anonymizer 9 + bounty_manager 1) — replay pool auth, `NOT_POOL`/`REPLAY`/`INVALID_OP`/`NONCE_ZERO`, real `OpenNoteDeposit` span (empty and `note_id 0xabc` with `STRK_TOKEN_ADDRESS` `0x04718f...`).
+- `git status` — `main` at `2214244` (`origin/main == 2214244`), only `M apps/web/next-env.d.ts` generated artifact (not staged), otherwise clean — confirmed no uncommitted code beyond Milestone 2.0. `git log --oneline -5` shows `2214244 → 071267a → a04e528` chain.
+
+**3. Deployment artifact (ready, not yet deployed):**
+- Class: `target/dev/verity_anonymizer_VerityAnonymizer.contract_class.json` (and `.compiled_contract_class.json`) — Sierra `0.1.0`, `abi` `IVerityAnonymizer` as above, `sierra_program` includes `OpenNoteDeposit` serialization.
+- Constructor args for Sepolia: `pool = 0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91` (the real pool; do NOT use a local address).
+- Network: `Starknet Sepolia` (`chainId 0x534e5f535345504f4c4941`, RPC `https://starknet-sepolia-rpc.publicnode.com` per `apps/web/lib/starknet.ts`).
+- Deployment account: **your** Sepolia Starknet account (Ready X / Braavos / sncast `~/.starknet_accounts`). Agent has no private key in repo and will not store one.
+
+**4. Real privacy_invoke test (objective):**
+Prove `STRK20 pool → privacy_invoke → VerityAnonymizer` via the verified Wallet API path:
+```
+wallet_strk20InvokeTransaction(
+  actions: [
+    // minimal proof (no open note): a single invoke to the deployed anonymizer
+    { type: 'invoke', contract: '<VerityAnonymizer address>', calldata: [ALLOWED_OP_PROOF, <random nonce>, 0] }
+    // alternative with open note (closer to tipjar pattern):
+    // { type: 'transfer', token: STRK, amount: 'OPEN', recipient: <your address> },
+    // { type: 'invoke', contract: '<VerityAnonymizer>', calldata: [ALLOWED_OP_PROOF, <nonce>, '${openNoteIds[0]}'] }
+  ]
+)
+```
+Pool will `call_contract_syscall(address: VerityAnonymizer, selector: 0x4029...25043, calldata: [operation, nonce, note_id])`. VerityAnonymizer checks caller==pool (`NOT_POOL` if direct wallet call), validates `operation == 'VERITY_PROOF'` (`INVALID_OP` otherwise), replay-protects `nonce` (`REPLAY` if reused), then returns `Span<OpenNoteDeposit>` (empty or one `note_id` deposit). Pool then emits `ExternalContractInvoked` and `OpenNoteDeposited` (if deposit returned) and verifies `undeposited_open_notes == 0`. This is NOT a normal Starknet `invoke` — it must go through `wallet_strk20InvokeTransaction` so the pool is the caller. Direct `wallet_addInvokeTransaction` to `VerityAnonymizer` would show caller≠pool and revert with `NOT_POOL`, which is *not* Gate 2.
+
+**5. STOP — Exact manual actions required (do not bypass):**
+1. **Open terminal** in `C:\Users\User\Documents\Verity` (Windows, with `sncast` from `snforge 0.63.0` in WSL or native). No secrets go in repo.
+2. **Declare** (or skip if already declared) — example with `sncast` (replace `<ACCOUNT>` with your Sepolia account alias from `sncast` config):
+   ```
+   wsl -d Ubuntu-24.04 -- bash -lc 'sncast --url https://starknet-sepolia-rpc.publicnode.com --account <ACCOUNT> declare --contract-name VerityAnonymizer'
+   ```
+   Record the `class_hash` printed.
+3. **Deploy** with the real pool:
+   ```
+   wsl -d Ubuntu-24.04 -- bash -lc 'sncast --url https://starknet-sepolia-rpc.publicnode.com --account <ACCOUNT> deploy --class-hash <CLASS_HASH> --constructor-calldata 0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91'
+   ```
+   Record: `contract_address` (VerityAnonymizer Sepolia), `class_hash`, `network=sepolia`, `constructor pool=0x0254...`, `deployment tx hash`.
+4. **Verify deployment** on Voyager: `https://sepolia.voyager.online/contract/<address>` shows `VerityAnonymizer` with `get_pool() == 0x0254...` and `version == 0x5645524954595f414e4f4e594d495a45525f5630`.
+5. **Prepare wallet test page** — the agent will add a minimal `apps/web/app/phase2-proof/page.tsx` that reuses the verified `connectWallet`/`WalletAccountV6` harness from `apps/web/strk20-proof/strk20-proof.ts:60` (Ready X, `walletV6.supportedWalletApi >=0.10.3`) and does the `invoke` above. For now, **do not click it** — agent will push that page and tell you when to open `http://localhost:3000/phase2-proof`.
+6. **When instructed, open** that page, click `Connect` (approve Ready X), verify `walletApiVersions` includes `0.10.3`, then click `Invoke VerityAnonymizer` — Ready X will show an STRK20 proof prompt (longer than normal). **Before signing**, verify: `contract` is your deployed VerityAnonymizer address, `operation` is `'VERITY_PROOF'` (`0x5645524954595f50524f4f46`), `note_id` is `0` (or `${openNoteIds[0]}` if using OPEN transfer), `network` is Sepolia. Expected `pool` invocation is *not* visible in wallet UI — it is pool-internal — but after signing you will get a `transaction_hash`.
+7. **After signing**, verify on Voyager: `https://sepolia.voyager.online/tx/<hash>` shows `execution_status: SUCCEEDED`, `finality: ACCEPTED_ON_L2`, involves pool `0x0254...` and anonymizer `<address>`, and emits `ExternalContractInvoked` (and `OpenNoteDeposited` if `note_id!=0`). Do NOT mark `transaction_hash` alone as success — need receipt status + pool→anonymizer call trace.
+
+**6. Gate 2 evidence required (after you sign):**
+- VerityAnonymizer Sepolia `address`, `class_hash`, `deployment tx hash`
+- Pool `0x0254a6b...` Sepolia
+- Operation `VERITY_PROOF` + `nonce` used
+- `privacy_invoke` selector `0x4029...25043` evidence (call trace / `ExternalContractInvoked` event)
+- Real `transaction_hash` from `wallet_strk20InvokeTransaction`
+- `execution_status: SUCCEEDED`, `finality` 
+- `VERITY contract reached: YES` (anonymizer storage shows `used_nonces[nonce]==true` or event)
+- Real `Span<OpenNoteDeposit>` (empty or one `STRK_TOKEN_ADDRESS` deposit) — no mirror
+- No simulation
+
+**7. Checkpoint discipline (this pre-deployment):**
+- No code change in this §24 — docs only, before user signing. `scarb build`/`snforge test` above are the pre-deployment verifications. After you provide deployment address + tx hash, agent will update `docs/AI_HANDOFF.md` with exact evidence, run `scarb build`/`snforge test`/`tsc --noEmit`/`next build` as post-deployment verification, then `commit → verify → push → verify origin/main`. Gate 2 remains **NO** until that on-chain proof is verified. Phase 3 not started.
+
+**Files for this pre-deployment checkpoint (none staged yet — awaiting your deployment):**
+- `docs/AI_HANDOFF.md` — this §24 (this commit will be docs-only, preserving `2214244` build artifacts; `Scarb.lock`/`target/` not re-committed)
 
