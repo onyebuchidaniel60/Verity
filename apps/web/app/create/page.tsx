@@ -5,6 +5,8 @@ import Link from "next/link";
 import { Contract } from "starknet";
 import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof";
 import { CONTRACTS } from "@/lib/contracts";
+import { createProvider } from "@/lib/starknet";
+import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty } from "@/lib/bounty";
 
 const NETWORK = "sepolia" as const;
 
@@ -14,15 +16,11 @@ export default function CreateBountyPage() {
   const [reward, setReward] = useState("1");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ hash: string; id: number | null } | null>(null);
+  const [success, setSuccess] = useState<{ hash: string; id: number | null; rewardWei: string; rewardDisplay: string } | null>(null);
 
+  // Single source of truth for STRK→wei (BigInt/string-safe, never Number/1e18).
   function humanToWei(s: string): string {
-    const trimmed = s.trim().replace(/,/g, "");
-    if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error("Please enter a valid reward amount");
-    const [whole, frac = ""] = trimmed.split(".");
-    if (frac.length > 18) throw new Error("Too many decimal places (max 18)");
-    const frac18 = (frac + "0".repeat(18)).slice(0, 18);
-    return BigInt((whole === "" ? "0" : whole) + frac18).toString();
+    return sharedHumanToWei(s);
   }
 
   async function handleCreate() {
@@ -33,6 +31,7 @@ export default function CreateBountyPage() {
       if (!title.trim()) throw new Error("Please add a bounty title");
       if (!reward.trim()) throw new Error("Please set a reward");
       const rewardWei = humanToWei(reward);
+      if (BigInt(rewardWei) <= 0n) throw new Error("Reward must be greater than 0");
       const metadata = title.trim().slice(0, 31) || "Verity Bounty";
       const metadataFelt = "0x" + Buffer.from(metadata).toString("hex").slice(0, 62) || "0x1234";
 
@@ -47,14 +46,36 @@ export default function CreateBountyPage() {
       const contract = new Contract({ abi: abi as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
       const res: any = await contract.invoke("create_bounty", [rewardWei, metadataFelt]);
       const hash = res.transaction_hash ?? res.hash ?? "";
+      // CREATE does NOT fund: wait for actual L2 confirmation, then read the
+      // authoritative on-chain bounty ID + reward. Metadata is written only
+      // after confirmation, keyed by the actual on-chain bounty ID.
       let newId: number | null = null;
+      let onChainRewardWei = rewardWei;
       try {
-        const c2 = new Contract({ abi: [{ name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+        const provider = createProvider(NETWORK);
+        if (hash) {
+          try {
+            await provider.waitForTransaction(hash, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+          } catch (w: any) {
+            console.warn("[create bounty] waitForTransaction warning", w?.message);
+          }
+        }
+        const c2 = new Contract({ abi: [{ name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
         const r: any = await c2.call("get_bounty_count", []);
         newId = Number(r?.count ?? r) || null;
-        // Persist full metadata off-chain for display (title, description, reward)
         if (newId) {
-          const meta = { title: title.trim(), description: description.trim(), reward, rewardWei, metadataFelt, createdAt: Date.now() };
+          // Verify on-chain reward is exactly what the user entered.
+          try {
+            const vm = await loadBounty(provider, newId);
+            onChainRewardWei = vm.rewardWei.toString();
+            if (BigInt(onChainRewardWei) !== BigInt(rewardWei)) {
+              console.warn(`[create bounty] reward mismatch: entered ${rewardWei} != on-chain ${onChainRewardWei} for bounty #${newId} — displaying on-chain value`);
+            }
+          } catch (vErr) {
+            console.warn("[create bounty] on-chain verification skipped", vErr);
+          }
+          // Persist title/description off-chain for display (reward/status stay on-chain authoritative).
+          const meta = { title: title.trim(), description: description.trim(), reward, rewardWei: onChainRewardWei, metadataFelt, createdAt: Date.now() };
           try {
             localStorage.setItem(`verity_bounty_${newId}`, JSON.stringify(meta));
             // Also keep an index
@@ -67,7 +88,7 @@ export default function CreateBountyPage() {
           } catch {}
         }
       } catch {}
-      setSuccess({ hash, id: newId });
+      setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)) });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("USER_REFUSED") || msg.includes("user rejected") || msg.includes("UserRejected")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
@@ -86,14 +107,16 @@ export default function CreateBountyPage() {
         <div style={{ width: 56, height: 56, borderRadius: 16, background: "var(--surface)", border: "1px solid var(--border)", display: "grid", placeItems: "center", margin: "0 auto 16px", fontSize: 24, color: "var(--text)" }}>
           ✓
         </div>
-        <h1 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>Your bounty is live</h1>
+        <h1 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>Bounty created</h1>
         <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 16px" }}>
-          It’s now visible to investigators. Next, fund it privately so the reward can be claimed.
+          Status: <strong>CREATED</strong> — not funded yet. Next, fund it privately so it can be opened for investigations.
         </p>
         <div className="card card-pad" style={{ textAlign: "left", marginBottom: 16 }}>
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Transaction</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Reward</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--accent)" }}>{success.rewardDisplay}</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>Transaction</div>
           <div style={{ fontSize: 12, wordBreak: "break-all", color: "var(--text-secondary)" }}>{success.hash}</div>
-          {success.id && <div style={{ marginTop: 8, fontSize: 13 }}>Bounty #{success.id} — <Link href={`/bounty/${success.id}`} className="underline" style={{ color: "var(--accent)" }}>View bounty →</Link></div>}
+          {success.id && <div style={{ marginTop: 8, fontSize: 13 }}>Bounty #{success.id} — Status: CREATED — <Link href={`/bounty/${success.id}`} className="underline" style={{ color: "var(--accent)" }}>Fund it privately →</Link></div>}
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
           <Link href="/bounties" className="btn btn-secondary">

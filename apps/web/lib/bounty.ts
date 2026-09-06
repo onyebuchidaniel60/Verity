@@ -1,112 +1,13 @@
 import { Contract, RpcProvider } from "starknet";
-import { createProvider } from "./starknet";
 import { CONTRACTS } from "./contracts";
+import {
+  BountyViewModel,
+  formatRewardWei,
+  getStatusName,
+} from "./bounty-pure";
 
-// Shared authoritative bounty model — chain is source of truth, BigInt exact, no Number.
-export type BountyStatusName = "Created" | "Funded" | "Open" | "WinnerSelected" | "Claimable" | "Paid" | "Refunded";
-
-export interface BountyViewModel {
-  id: number;
-  creator: string;
-  rewardWei: bigint; // exact u128 as bigint, never Number
-  rewardStr: string; // human "10" or "1,550"
-  status: BountyStatusName;
-  metadataHash: string;
-  createdAt: number;
-  fundedAmountWei: bigint;
-  winner: string | null;
-  winningSubmission: number | null;
-  title: string;
-  description: string;
-}
-
-export function formatRewardWei(wei: bigint | string | number): string {
-  try {
-    const n = BigInt(wei ?? 0);
-    if (n === 0n) return "0 STRK";
-    const weiPerStrk = 1000000000000000000n;
-    const whole = n / weiPerStrk;
-    const frac = n % weiPerStrk;
-    if (frac === 0n) return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} STRK`;
-    let fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
-    if (fracStr.length > 6) fracStr = fracStr.slice(0, 6).replace(/0+$/, "");
-    if (whole === 0n) return `0.${fracStr} STRK`;
-    return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fracStr} STRK`;
-  } catch {
-    return String(wei ?? "—");
-  }
-}
-
-export function weiToStr(wei: bigint | string): string {
-  try {
-    const n = BigInt(wei);
-    const weiPerStrk = 1000000000000000000n;
-    const whole = n / weiPerStrk;
-    const frac = n % weiPerStrk;
-    if (frac === 0n) return whole.toString();
-    const fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
-    return `${whole.toString()}.${fracStr}`;
-  } catch {
-    return String(wei);
-  }
-}
-
-export function humanToWei(s: string): string {
-  const trimmed = s.trim().replace(/,/g, "");
-  if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error("Please enter a valid amount");
-  const [whole, frac = ""] = trimmed.split(".");
-  if (frac.length > 18) throw new Error("Too many decimal places (max 18)");
-  const frac18 = (frac + "0".repeat(18)).slice(0, 18);
-  return BigInt((whole === "" ? "0" : whole) + frac18).toString();
-}
-
-// Extract status name from CairoCustomEnum or string/number
-export function getStatusName(status: any): BountyStatusName {
-  if (!status) return "Created";
-  if (typeof status === "string") {
-    // Handle both "Created" and "0" etc.
-    if (["Created","Funded","Open","WinnerSelected","Claimable","Paid","Refunded"].includes(status)) return status as BountyStatusName;
-    const map: Record<string, BountyStatusName> = { "0":"Created","1":"Funded","2":"Open","3":"WinnerSelected","4":"Claimable","5":"Paid","6":"Refunded" };
-    return map[status] || "Created";
-  }
-  if (typeof status === "number" || typeof status === "bigint") {
-    const map: Record<string, BountyStatusName> = { "0":"Created","1":"Funded","2":"Open","3":"WinnerSelected","4":"Claimable","5":"Paid","6":"Refunded" };
-    return map[String(status)] || "Created";
-  }
-  // CairoCustomEnum { variant: {Created: {}, Funded: undefined, ...} }
-  if (typeof status === "object" && status.variant) {
-    const variant = status.variant as Record<string, any>;
-    const key = Object.keys(variant).find(k => variant[k] !== undefined);
-    if (key && ["Created","Funded","Open","WinnerSelected","Claimable","Paid","Refunded"].includes(key)) return key as BountyStatusName;
-  }
-  // Fallback for starknet.js enum that may be like { Created: null } directly
-  if (typeof status === "object") {
-    const keys = Object.keys(status);
-    for (const k of keys) {
-      if (["Created","Funded","Open","WinnerSelected","Claimable","Paid","Refunded"].includes(k)) return k as BountyStatusName;
-    }
-    // Try to find active variant where value is {} or not undefined
-    for (const k of keys) {
-      if ((status as any)[k] !== undefined) return k as BountyStatusName;
-    }
-  }
-  return "Created";
-}
-
-export function getSubmissionStatusName(status: any): string {
-  if (!status) return "Pending";
-  if (typeof status === "string") return status;
-  if (typeof status === "object" && status.variant) {
-    const variant = status.variant as Record<string, any>;
-    const key = Object.keys(variant).find(k => variant[k] !== undefined);
-    return key || "Pending";
-  }
-  if (typeof status === "object") {
-    const keys = Object.keys(status);
-    for (const k of keys) if (["Pending","Accepted","Rejected","Reported","Slashed"].includes(k)) return k;
-  }
-  return String(status);
-}
+// Re-export pure logic so existing `@/lib/bounty` imports keep working.
+export * from "./bounty-pure";
 
 // Load a single bounty authoritative from chain + optional localStorage title/desc
 export async function loadBounty(provider: RpcProvider, id: number): Promise<BountyViewModel> {
@@ -142,6 +43,14 @@ export async function loadBounty(provider: RpcProvider, id: number): Promise<Bou
       const meta = JSON.parse(raw);
       if (meta?.title) title = meta.title;
       if (meta?.description) description = meta.description;
+      // On-chain reward is authoritative: detect local metadata mismatch, never display local value.
+      if (meta?.rewardWei !== undefined) {
+        try {
+          if (BigInt(meta.rewardWei).toString() !== rewardWei.toString()) {
+            console.warn(`[bounty ${idNum}] metadata reward mismatch: local ${meta.rewardWei} != on-chain ${rewardWei.toString()} — displaying on-chain value`);
+          }
+        } catch {}
+      }
     }
   } catch {}
   if (title === `Bounty #${idNum}`) {

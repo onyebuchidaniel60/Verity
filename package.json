@@ -8,6 +8,7 @@
     "build:web": "pnpm --filter @verity/web build",
     "dev:web": "pnpm --filter @verity/web dev",
     "typecheck:web": "pnpm --filter @verity/web exec tsc --noEmit",
+    "test:bounty": "pnpm --filter @verity/web run test:bounty",
     "contracts:build": "scarb build",
     "contracts:test": "scarb test",
     "contracts:test:snforge": "snforge test"

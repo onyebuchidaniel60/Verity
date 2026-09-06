@@ -1069,6 +1069,157 @@ Pool will `call_contract_syscall(address: VerityAnonymizer, selector: 0x4029...2
 - Re-test `Fund privately` via `Ready X` wallet on a fresh V2 `Created` bounty (e.g., create via `/create` with `0.5 STRK`, then fund with `Amount to fund 0.5 STRK` exact, wallet private mode, `transfer OPEN + invoke FUND_BOUNTY` hex) and capture `transaction_hash` + `BountyFunded` event on new V2, verify `Funded`, then run the investigator `stake→submit→select→claim` via frontend as the two accounts (creator `ready-sepolia`, investigator `investigator-sepolia` via wallet) to prove private funding+payout end-to-end on V2 with real `wallet_strk20InvokeTransaction`, not just simulation.
 - After that, mainnet `strk20.json` can be filled with V2 mainnet pool `0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a` deployment (same V2 class `0x712413…` on mainnet, new `declare`/`deploy` txs) once Sepolia V2 flow is fully wallet-verified.
 
+## 29. STOP-NEW-FEATURES FIX — reward/status/submission gating (2026-09-07, Muse Spark)
+
+**Instruction:** STOP new features (no private identity/staking/reputation/Ethos/ZK).
+Fix + prove the existing bounty flow first. Do NOT trust previous "fixed"
+claims — verify in the running app. Three blocking bugs: (1) wrong reward
+display, (2) funding confused with creation, (3) submission blocked.
+
+**Audit (before changing code) — root causes found, all evidence-backed:**
+
+1. **Bug 1 (reward 0 STRK):** `bounty/[id]/page.tsx` read
+   `bounty.reward_amount` / `bounty[2]`, but `loadBounty` returns the
+   `BountyViewModel` shape `{rewardWei: bigint, rewardStr, status, ...}`.
+   `reward_amount` is `undefined` → `BigInt(0)` → "0 STRK". The claim path
+   even fell back to the arbitrary constant `1000` wei. List page was
+   correct (uses `rewardStr`), which is why list/detail disagreed.
+2. **Bug 2 (funding confused / Fund form missing):** `loadBounty` returns
+   canonical PascalCase status (`"Created"`, from
+   `{variant:{Created:{}}}`), but the detail page compared
+   `statusKey === "0" || "CREATED"` and `STATUS_META` had only
+   numeric/UPPERCASE keys. `"Created"` matched nothing → all
+   `isCreated/isFunded/isOpen/...` false → Fund form hidden, timeline
+   broken, and `fundPrivate` validated the entered amount against reward
+   `0` → `AMOUNT_MISMATCH` even for the correct amount. Create page also
+   read `get_bounty_count` immediately after `invoke` without waiting for
+   L2 acceptance → wrong ID → metadata attached to the wrong bounty.
+   Success copy said "Your bounty is live / visible to investigators",
+   implying OPEN while the chain says CREATED.
+3. **Bug 3 (submission disabled):** submit button was
+   `disabled={!!busy || !eligibility?.eligible}`, so any unstaked /
+   low-rep wallet saw a mysteriously disabled form. On-chain V2 still
+   requires the one-click `stake()` flag (`NOT_STAKED`, `REPUTATION_TOO_LOW`
+   in `e2e_test.cairo`), so the form must stay *visible/enabled* and
+   surface staking as a one-click helper — not a blur gate. Creator block
+   existed in `submit()` but had no explicit banner for creators on OPEN.
+
+**Fix (frontend only — no contract redeploy, no new features):**
+
+- `apps/web/lib/bounty-pure.ts` (NEW, dependency-free): single source of
+  truth — `humanToWei`/`weiToStr`/`formatRewardWei` (BigInt exact, never
+  `Number`/`1e18`/`parseFloat`), `getStatusName` (CairoCustomEnum +
+  numeric + PascalCase + UPPER_CASE + legacy `VOTING`), `isStatus` family,
+  `parseRewardWei`/`getRewardWei` (ViewModel `rewardWei` wins; on-chain
+  authoritative), `validateFundingAmount` (entered == on-chain exact),
+  `normalizeAddrLower`/`isCreator`, `canSubmitInvestigation` /
+  `submitBlockMessage` (OPEN + connected + non-creator + non-empty
+  evidence; staking/reputation deliberately NOT gating).
+- `apps/web/lib/bounty.ts`: thin wrapper re-exporting `bounty-pure` +
+  `loadBounty`/`loadBounties` (full ABI via `getClassAt`, array/object
+  shapes, BigInt, local-metadata reward mismatch only *logged*, on-chain
+  always displayed).
+- `apps/web/app/bounty/[id]/page.tsx`: status via `getStatusName` +
+  `is*Status` helpers; `STATUS_META` gains PascalCase keys; ALL reward
+  reads via `getRewardWei` (fund validation, claim amount, display,
+  prefill); `guard` waits `provider.waitForTransaction` before reload so
+  FUNDED/OPEN appear only after confirmation (no optimistic UI); Fund form
+  creator-only with "Bounty reward: X" + "Use reward amount" + exact-match
+  validation, wallet opens only on click; OPEN shows creator banner "You
+  created this bounty. You cannot submit an investigation to it." and, for
+  non-creators, a permanently visible/enabled "Submit an investigation"
+  form (`disabled={!!busy}` only); staking panel kept as one-click helper
+  ("Investigator staking (one-click, interim)") with `NOT_STAKED` guidance
+  if the chain reverts.
+- `apps/web/app/create/page.tsx`: shared `humanToWei`; waits
+  `waitForTransaction`, then reads actual `get_bounty_count`, verifies
+  on-chain `rewardWei == entered`, writes `verity_bounty_<actual ID>`
+  only after confirmation; success screen shows reward + `Status: CREATED`
+  + "Fund it privately →" (never "live/visible to investigators").
+- `apps/web/app/bounties/page.tsx`: `STATUS_LABEL` gains PascalCase keys
+  (badges correct for all states; reward already via `rewardStr`).
+- Regression tests `apps/web/lib/bounty.regression.test.ts`
+  (`node --test`, 20 tests, 4 suites) + `test:bounty` scripts in
+  `apps/web/package.json` and root `package.json`; `tsconfig.json`
+  excludes `**/*.test.ts` (Node needs the `.ts` import extension).
+- `AGENTS.md` §7a: persisted the do-not-claim-fixed-without-verification
+  rule.
+
+**Verification (exact evidence — honest about agent limits):**
+
+- `node --test apps/web/lib/bounty.regression.test.ts` — **20 pass, 0 fail**
+  (0.1/1/10/1,550/1550/0.000001 STRK round-trips; 10 STRK →
+  `10000000000000000000` → "10 STRK"; status enum/legacy parsing;
+  CREATE≠FUND; funding exact-match; CREATED/FUNDED→cannot submit;
+  OPEN→investigator can; creator blocked).
+- `corepack pnpm --filter @verity/web exec tsc --noEmit` — **EXIT 0**.
+- `corepack pnpm --filter @verity/web run build` — **7/7 routes, success**.
+- `wsl scarb build` — **Finished dev 4s** (pre-existing warnings only).
+- `wsl snforge test` — **21 passed, 0 failed**
+  (bounty_manager 12 incl. `test_creator_cannot_submit`,
+  `test_not_staked_cannot_submit`, full lifecycle, report/dispute,
+  refund-with-fee; anonymizer 9).
+- Sepolia read-only (public RPC, no signing):
+  `BOUNTY_COUNT=8`; #1 `1e17→0.1 STRK/Paid` OK; #2 `2e17→0.2/Refunded` OK;
+  #3 `3e17→0.3/Open` OK; #4 `21e18→21 STRK/Created` OK;
+  **#5 `10000000000000000000→10 STRK/Created` OK** (the reported bug value:
+  stored exact, displayed exact, status CREATED not FUNDED/OPEN);
+  #6 `14e18→14/Created` OK; #7 `8 STRK/Created`; #8 `19 STRK/Created`;
+  prefill `weiToStr(10 STRK)="10"`, `1550→"1550"`. `SEPOLIA_READONLY_VERIFY=PASS`.
+- **NOT verified (requires manual wallet signing — agent cannot sign):**
+  real browser create→fund→open→submit→select→claim→refund with CREATOR +
+  INVESTIGATOR wallets on Sepolia, and reload/list/detail reward eyeball
+  checks. The gate checkboxes below therefore remain **code+read-only
+  verified, NOT browser-wallet verified**. Do NOT start private
+  staking/identity until the user completes the manual gate (§29.1).
+
+**Known limitations:**
+
+- V2 contract still enforces one-click `stake()` + `rep>=60`
+  (`NOT_STAKED`/`REPUTATION_TOO_LOW`); the UI no longer gates on it, but
+  an unstaked wallet's submit tx will revert with a guided "stake first"
+  message. Removing the on-chain gate requires a contract change +
+  redeploy — deliberately NOT done here (STOP-new-features rule).
+- `submit()` converts evidence text to a 31-char felt (existing
+  limitation, unchanged).
+
+**Files changed (uncommitted):**
+
+- `apps/web/lib/bounty-pure.ts` (new), `apps/web/lib/bounty.regression.test.ts` (new)
+- `apps/web/lib/bounty.ts` (thin wrapper), `apps/web/app/bounty/[id]/page.tsx`,
+  `apps/web/app/bounties/page.tsx`, `apps/web/app/create/page.tsx`,
+  `apps/web/tsconfig.json`, `apps/web/package.json`, `package.json`,
+  `AGENTS.md`, `docs/AI_HANDOFF.md` (this §29).
+
+### 29.1 FINAL GATE — status (honest)
+
+- [x] Correct reward displayed after creation (code + read-only; browser pending)
+- [x] Correct reward survives reload (on-chain authoritative + local mismatch logged)
+- [x] Correct reward in bounty list (`rewardStr`)
+- [x] Correct reward in bounty detail (`getRewardWei`)
+- [x] Funding field auto-contains exact reward (`weiToStr(rewardWei)` + button)
+- [x] Creation does not fund (CREATED copy + waitForTransaction + no optimistic state)
+- [x] Bounty remains CREATED until funding succeeds (guard waits for confirmation)
+- [x] Funding → FUNDED only after confirmation (same)
+- [x] Opening is separate (`open_bounty` creator-only, FUNDED→OPEN)
+- [x] OPEN state correct (helpers + STATUS_META)
+- [x] Submission form visible/enabled for non-creator on OPEN (never staking-gated)
+- [x] Investigator submit path works (code; on-chain needs one-click stake first)
+- [x] Creator cannot submit (UX banner + `canSubmitInvestigation` + contract `CREATOR_CANNOT_SUBMIT` test)
+- [x] Creator sees submissions + selects winner (unchanged, contract-tested)
+- [ ] Real browser test completed (REQUIRES USER — agent cannot sign)
+- [ ] Real Sepolia wallet test completed (REQUIRES USER — two wallets)
+- [x] Regression tests added (20 pass, remain in repo)
+- [x] Documentation updated (this §29 + AGENTS.md §7a)
+
+**Exact next step for the user (manual, ~15 min):**
+`pnpm dev:web` → create bounty with reward `10` → confirm creation result
+shows `10 STRK` + `Status: CREATED` → reload → list → detail (all `10 STRK`,
+CREATED, funding field `10`) → Fund privately → confirm → FUNDED → Open →
+OPEN → switch to investigator wallet → submit investigation → creator sees
+it → select winner → refund-path on a second bounty. Paste any failure +
+console `[fundPrivate]`/`[claim]` lines back here.
+
 
 
 

@@ -360,6 +360,33 @@ Never describe a lower level of verification as a higher one.
 
 Never claim real STRK20 functionality based only on mocked, simulated, local accounting, or compilation behavior.
 
+---
+
+# 7a\. Do-Not-Claim-Fixed-Without-Verification Rule (bounty lifecycle)
+
+A bounty-flow feature is NEVER considered "fixed" because TypeScript passes,
+the production build passes, tests pass, the code looks correct, a previous
+model said it was fixed, a commit message says "fix", or the UI renders
+without errors.
+
+A feature is only considered fixed after the original problem is reproduced,
+the fix is implemented, the application is run, and the actual user workflow
+is verified in the running app (and on Sepolia where chain state is involved).
+
+Required evidence before saying "fixed" for the bounty lifecycle:
+
+* reward entered (e.g. 10 STRK) → exact wei stored → exact displayed reward
+  in creation result, bounty list, bounty detail, and funding form;
+* after create: CREATED (never FUNDED/OPEN/CLAIMABLE);
+* funding field auto-populated with the exact on-chain reward;
+* FUNDED only after successful funding-tx confirmation (rejected/failed tx
+  leaves CREATED); OPEN only after a separate open action;
+* investigator submission form visible and enabled for a connected
+  non-creator on OPEN; creator submitting own bounty is BLOCKED (UX +
+  contract); creator can see submissions and select a winner;
+* no optimistic UI for reward/funded/open/winner/paid/refunded/submitted —
+  chain state or confirmed tx results drive these states.
+
 \---
 
 # 8\. STRK20 Rules

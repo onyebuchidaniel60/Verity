@@ -9,12 +9,13 @@ import { createProvider, VERITY_NETWORKS } from "@/lib/starknet";
 import { CONTRACTS } from "@/lib/contracts";
 import { STRK20 } from "@/lib/strk20";
 import { useWalletStore } from "@/store/wallet";
-import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName } from "@/lib/bounty";
+import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus } from "@/lib/bounty";
 
 const NETWORK = "sepolia" as const;
 const POOL = STRK20[NETWORK].poolAddress as Address;
 
 // New lifecycle: Created(0) → Funded(1) → Open(2) → WinnerSelected(3) → Claimable(4) → Paid(5) → Refunded(6)
+// Keys cover numeric, PascalCase (canonical from getStatusName), and legacy uppercase.
 const STATUS_META: Record<string, { label: string; cls: string; desc: string }> = {
   "0": { label: "Created", cls: "badge-created", desc: "Waiting to be funded" },
   "1": { label: "Funded", cls: "badge-funded", desc: "Ready to open" },
@@ -23,6 +24,13 @@ const STATUS_META: Record<string, { label: string; cls: string; desc: string }> 
   "4": { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
   "5": { label: "Paid", cls: "badge-paid", desc: "Completed" },
   "6": { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
+  Created: { label: "Created", cls: "badge-created", desc: "Waiting to be funded" },
+  Funded: { label: "Funded", cls: "badge-funded", desc: "Ready to open" },
+  Open: { label: "Open", cls: "badge-open", desc: "Accepting investigations" },
+  WinnerSelected: { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
+  Claimable: { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
+  Paid: { label: "Paid", cls: "badge-paid", desc: "Completed" },
+  Refunded: { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
   // Backwards compat for old Sepolia bounties that used Voting (3) etc.
   "VOTING": { label: "Voting", cls: "badge-voting", desc: "Under review" },
   "WINNER_SELECTED": { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
@@ -224,7 +232,17 @@ export default function BountyDetailPage() {
     setTxHash(null);
     try {
       const hash = await fn();
-      if (hash) setTxHash(hash);
+      if (hash) {
+        setTxHash(hash);
+        // FUNDED/OPEN/etc only after actual L2 confirmation — never optimistic.
+        // Wait briefly for the tx to be accepted before reloading chain state.
+        try {
+          await provider.waitForTransaction(hash as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+        } catch (waitErr) {
+          console.warn(`[bounty ${id}] waitForTransaction warning for ${key}`, waitErr);
+          // Fall through to reload anyway — load() reads authoritative chain state.
+        }
+      }
       await load();
     } catch (e: any) {
       const rawMsg = e instanceof Error ? e.message : String(e);
@@ -275,17 +293,13 @@ export default function BountyDetailPage() {
   const fundPrivate = () =>
     guard("fund", async () => {
       if (!bounty) throw new Error("Bounty not loaded");
-      const rewardWei = bounty.reward_amount ?? bounty.rewardAmount ?? bounty[2] ?? 0;
-      const rewardWeiStr = BigInt(String(rewardWei)).toString();
+      // On-chain reward is authoritative — never localStorage, never a fallback constant.
+      const rewardWei = getRewardWei(bounty);
+      const rewardWeiStr = rewardWei.toString();
+      const v = validateFundingAmount(fundAmount, rewardWei);
       if (!fundAmount.trim()) { setFundAmountError("Please enter an amount"); throw new Error("Please enter a funding amount"); }
-      let enteredWei: string;
-      try { enteredWei = humanToWei(fundAmount); } catch (e: any) { setFundAmountError(e.message); throw e; }
-      if (BigInt(enteredWei) <= 0n) { setFundAmountError("Amount must be greater than 0"); throw new Error("Amount must be greater than 0"); }
-      if (BigInt(enteredWei) !== BigInt(rewardWeiStr)) {
-        const rewardStr = formatReward(rewardWeiStr);
-        setFundAmountError(`Amount must equal the bounty reward: ${rewardStr}`);
-        throw new Error(`AMOUNT_MISMATCH: entered ${enteredWei} != reward ${rewardWeiStr}`);
-      }
+      if (!v.ok) { setFundAmountError(v.error || "Funding amount must match the bounty reward."); throw new Error(`AMOUNT_MISMATCH: entered ${v.enteredWei} != reward ${rewardWeiStr}`); }
+      const enteredWei = v.enteredWei;
       setFundAmountError(null);
       const address = await ensureConnected();
       const { wallet } = await connectWallet();
@@ -319,9 +333,9 @@ export default function BountyDetailPage() {
         const checkContract = new Contract({ abi: [{ name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "bounty", type: "Bounty" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
         const chk: any = await checkContract.call("get_bounty", [bountyId]);
         const chkB = chk?.bounty ?? chk;
-        const status = String(chkB?.status ?? chkB?.[3] ?? "");
-        console.info("[fundPrivate] bounty status before", chkB, "statusKey", status);
-        if (status !== "0" && status !== "CREATED" && status !== "Created") throw new Error(`NOT_CREATED: bounty status is ${status}, expected Created (0)`);
+        const statusName = getStatusName(chkB?.status ?? chkB?.[3] ?? "");
+        console.info("[fundPrivate] bounty status before", chkB, "statusName", statusName);
+        if (statusName !== "Created") throw new Error(`NOT_CREATED: bounty status is ${statusName}, expected Created`);
       } catch (e: any) {
         if (String(e.message).includes("NOT_CREATED")) throw e;
         console.warn("[fundPrivate] pre-flight warning", e);
@@ -360,11 +374,24 @@ export default function BountyDetailPage() {
 
   const submit = () =>
     guard("submit", async () => {
-      if (!evidence.trim()) throw new Error("Please add investigation details");
-      const creator = bounty?.creator ?? bounty?.[1];
-      const normCreator = creator ? normalizeAddr(String(creator)) : null;
-      const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
-      if (normCreator && normConnected && normCreator === normConnected) throw new Error("CREATOR_CANNOT_SUBMIT: This is your bounty. You can't submit an investigation to your own bounty.");
+      // Current-stage rule (BEFORE private staking): any connected non-creator
+      // can submit to an OPEN bounty. Creator is blocked (UX + on-chain).
+      const statusName = getStatusName((bounty as any)?.status ?? "Created");
+      const check = canSubmitInvestigation({
+        status: statusName,
+        creator: (bounty as any)?.creator ?? null,
+        connectedAddr,
+        evidence,
+      });
+      if (!check.ok) {
+        if (check.reason === "IS_CREATOR") throw new Error("CREATOR_CANNOT_SUBMIT: This is your bounty. You can't submit an investigation to your own bounty.");
+        if (check.reason === "NOT_OPEN") throw new Error("NOT_OPEN: This bounty is not open for submissions right now.");
+        if (check.reason === "NOT_CONNECTED") { await ensureConnected(); }
+        if (!evidence.trim()) throw new Error("Please add investigation details");
+        // Re-check after ensuring connection
+        const recheck = canSubmitInvestigation({ status: statusName, creator: (bounty as any)?.creator ?? null, connectedAddr: connectedAddr || walletStoreAddr, evidence });
+        if (!recheck.ok && recheck.reason === "IS_CREATOR") throw new Error("CREATOR_CANNOT_SUBMIT: This is your bounty. You can't submit an investigation to your own bounty.");
+      }
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
@@ -440,17 +467,18 @@ export default function BountyDetailPage() {
 
   const claim = () =>
     guard("claim", async () => {
-      const winner = bounty?.winner ?? bounty?.[7];
+      const winner = (bounty as any)?.winner ?? null;
       const normWinner = winner ? normalizeAddr(String(winner)) : null;
       const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
       if (normWinner && normConnected && normWinner !== normConnected) throw new Error("NOT_AUTHORIZED_CLAIM: Only the winner can claim this reward");
-      if (!winner || String(winner) === "0x0" || winner === 0) throw new Error("No winner selected yet");
+      if (!winner || String(winner) === "0x0" || (winner as any) === 0) throw new Error("No winner selected yet");
       const { wallet, address } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
       const bountyIdFelt = "0x" + BigInt(bountyId).toString(16);
-      const amountFelt = "0x" + BigInt(String(bounty?.reward_amount ?? bounty?.rewardAmount ?? 1000)).toString(16);
+      // On-chain reward is authoritative — never a hardcoded fallback.
+      const amountFelt = "0x" + getRewardWei(bounty).toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
       const operation = "0x52454c45415345";
       const actionArray = [
@@ -497,32 +525,36 @@ export default function BountyDetailPage() {
     );
   }
 
-  const statusKey = String(bounty?.status ?? bounty?.[3] ?? "0");
-  const meta = STATUS_META[statusKey] ?? { label: statusKey, cls: "badge-created", desc: "" };
-  const reward = bounty?.reward_amount ?? bounty?.[2] ?? 0;
-  const rewardStr = formatReward(reward);
+  // Authoritative chain state: status is canonical PascalCase from loadBounty;
+  // getStatusName tolerates numeric/uppercase legacy shapes too.
+  const statusName = getStatusName((bounty as any)?.status ?? "Created");
+  const statusKey = statusName;
+  const meta = STATUS_META[statusKey] ?? STATUS_META[String((bounty as any)?.status ?? "Created")] ?? { label: statusKey, cls: "badge-created", desc: "" };
+  // On-chain reward is authoritative — never localStorage, never a fallback constant.
+  const rewardWei = getRewardWei(bounty);
+  const rewardStr = formatRewardWei(rewardWei);
   const storedMeta = (() => {
     const m = getStoredMeta(Number(id));
     if (m?.title) return m;
-    const feltTitle = feltToTitle(bounty?.metadata_hash ?? bounty?.[4]);
+    const feltTitle = feltToTitle((bounty as any)?.metadataHash ?? (bounty as any)?.metadata_hash);
     if (feltTitle) return { title: feltTitle, description: "" };
     return null;
   })();
-  const displayTitle = storedMeta?.title || `Bounty #${id}`;
-  const displayDesc = storedMeta?.description || "Investigation bounty — evidence helps verify the claim.";
-  const isPaid = statusKey === "5" || statusKey === "PAID";
-  const isClaimable = statusKey === "4" || statusKey === "CLAIMABLE";
-  const isWinnerSelected = statusKey === "3" || statusKey === "WINNER_SELECTED";
-  const isOpen = statusKey === "2" || statusKey === "OPEN";
-  const isFunded = statusKey === "1" || statusKey === "FUNDED";
-  const isCreated = statusKey === "0" || statusKey === "CREATED";
-  const isRefunded = statusKey === "6" || statusKey === "REFUNDED";
-  const creatorAddr = String(bounty?.creator ?? bounty?.[1] ?? "");
-  const winnerAddr = String(bounty?.winner ?? bounty?.[7] ?? "");
+  const displayTitle = storedMeta?.title || (bounty as any)?.title || `Bounty #${id}`;
+  const displayDesc = storedMeta?.description || (bounty as any)?.description || "Investigation bounty — evidence helps verify the claim.";
+  const isPaid = isPaidStatus(statusName);
+  const isClaimable = isClaimableStatus(statusName);
+  const isWinnerSelected = isWinnerSelectedStatus(statusName);
+  const isOpen = isOpenStatus(statusName);
+  const isFunded = isFundedStatus(statusName);
+  const isCreated = isCreatedStatus(statusName);
+  const isRefunded = isRefundedStatus(statusName);
+  const creatorAddr = String((bounty as any)?.creator ?? "");
+  const winnerAddr = String((bounty as any)?.winner ?? "");
   const normCreator = normalizeAddr(creatorAddr);
   const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
   const normWinner = normalizeAddr(winnerAddr);
-  const isCreator = !!(normCreator && normConnected && normCreator === normConnected);
+  const isCreator = isCreatorAddr(creatorAddr, connectedAddr);
   const isWinner = !!(normWinner && normConnected && normWinner === normConnected && normWinner !== "0x0000000000000000000000000000000000000000000000000000000000000000");
 
   const timeline = [
@@ -585,13 +617,13 @@ export default function BountyDetailPage() {
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "var(--text-muted)" }}>Created</span>
-              <span>{bounty.created_at ? new Date(Number(bounty.created_at) * 1000).toLocaleDateString() : "—"}</span>
+              <span>{(bounty as any)?.createdAt ? new Date(Number((bounty as any).createdAt) * 1000).toLocaleDateString() : "—"}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "var(--text-muted)" }}>Submissions</span>
               <span>{submissions.length}</span>
             </div>
-            {bounty.winner && String(bounty.winner) !== "0x0" && String(bounty.winner) !== "0" && (
+            {(bounty as any)?.winner && String((bounty as any).winner) !== "0x0" && String((bounty as any).winner) !== "0" && (
               <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
                 <span style={{ color: "var(--text-muted)" }}>Winner</span>
                 <span style={{ fontFamily: "Fragment Mono", fontSize: 12 }}>{anonId(winnerAddr)} {isWinner && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
@@ -605,10 +637,13 @@ export default function BountyDetailPage() {
         </div>
       )}
 
-      {/* Investigator eligibility panel — shown when not creator and bounty open */}
+      {/* Investigator staking panel (interim V2 on-chain requirement).
+          The submission form below is NOT gated by this panel: any connected
+          non-creator can submit to an OPEN bounty. If the chain reverts with
+          NOT_STAKED, stake here in one click and retry. */}
       {!isCreator && isOpen && (
         <div className="card card-pad" style={{ marginBottom: 16, borderColor: eligibility?.eligible ? "var(--border)" : "var(--amber-border)" }}>
-          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Your eligibility</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Investigator staking (one-click, interim)</h3>
           {!connectedAddr ? (
             <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>Connect your wallet to check eligibility.</p>
           ) : !eligibility ? (
@@ -658,9 +693,9 @@ export default function BountyDetailPage() {
       <div className="card card-pad" style={{ marginBottom: 16 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Actions</h3>
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px", lineHeight: 1.5 }}>
-          {isCreated && (isCreator ? "This bounty is waiting for funding. Enter the reward amount and fund it privately." : "This bounty is waiting for funding.")}
-          {isFunded && "Bounty funded. The creator can now open it for investigations."}
-          {isOpen && (isCreator ? "Investigations are coming in. Review them below and select a winner when ready. You can also reclaim funds if no entry deserves the reward." : eligibility?.eligible ? "Bounty is open. Share your investigation for review." : "Bounty is open — check eligibility above.")}
+          {isCreated && (isCreator ? "Status: CREATED — waiting for funding. Enter the exact reward amount and fund it privately. The bounty is NOT funded yet." : "Status: CREATED — waiting for the creator to fund this bounty.")}
+          {isFunded && (isCreator ? "Status: FUNDED — now open it for investigations. This is a separate step." : "Status: FUNDED — awaiting the creator to open it for investigations.")}
+          {isOpen && (isCreator ? "Investigations are coming in. Review them below and select a winner when ready. You can also reclaim funds if no entry deserves the reward." : "Bounty is open. Share your investigation for review below.")}
           {isWinnerSelected && "A winner has been selected. The reward is ready to be released."}
           {isClaimable && (isWinner ? "You won! Claim your reward privately." : isCreator ? "A winner has been selected. The reward will be released to the winner." : "A winner has been selected. Awaiting payout.")}
           {isPaid && "This bounty is complete. The reward has been released."}
@@ -668,8 +703,10 @@ export default function BountyDetailPage() {
         </p>
 
         <div style={{ display: "grid", gap: 10 }}>
-          {isCreated && (
+          {isCreated && isCreator && (
             <div style={{ display: "grid", gap: 10, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Fund this bounty</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Bounty reward: <strong style={{ color: "var(--accent)" }}>{rewardStr}</strong></div>
               <div>
                 <label className="label" htmlFor="fund-amount">Amount to fund</label>
                 <div style={{ position: "relative" }}>
@@ -677,7 +714,7 @@ export default function BountyDetailPage() {
                     id="fund-amount"
                     className="input"
                     inputMode="decimal"
-                    placeholder={weiToStr(reward)}
+                    placeholder={weiToStr(rewardWei)}
                     value={fundAmount}
                     onChange={(e) => {
                       setFundAmount(e.target.value);
@@ -688,38 +725,51 @@ export default function BountyDetailPage() {
                   <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: "var(--text-muted)", fontWeight: 600 }}>STRK</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, gap: 8, flexWrap: "wrap" }}>
-                  <span className="help" style={{ margin: 0 }}>This is the reward amount set for this bounty.</span>
-                  <button type="button" className="btn btn-ghost" style={{ padding: "4px 8px", fontSize: 12, height: 28 }} onClick={() => setFundAmount(weiToStr(reward))}>Use reward amount</button>
+                  <span className="help" style={{ margin: 0 }}>Must exactly equal the bounty reward.</span>
+                  <button type="button" className="btn btn-ghost" style={{ padding: "4px 8px", fontSize: 12, height: 28 }} onClick={() => setFundAmount(weiToStr(rewardWei))}>Use reward amount</button>
                 </div>
                 {fundAmountError && <div style={{ fontSize: 12, color: "var(--red)", marginTop: 6 }}>{fundAmountError}</div>}
               </div>
               <button disabled={!!busy} onClick={fundPrivate} className="btn btn-primary">
                 {busy === "fund" ? "Confirm in wallet…" : "Fund privately"}
               </button>
-              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>This amount will be privately committed to this bounty.</p>
+              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>Your wallet will open only when you click Fund privately. Status becomes FUNDED only after the transaction is confirmed.</p>
             </div>
           )}
-          {isFunded && (
+          {isCreated && !isCreator && (
+            <div className="alert alert-warn" style={{ margin: 0 }}>
+              <span>◈</span>
+              <div><strong>Status: CREATED — awaiting creator funding</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Only the creator can fund this bounty. Check back after it is funded and opened.</div></div>
+            </div>
+          )}
+          {isFunded && isCreator && (
             <button disabled={!!busy} onClick={open} className="btn btn-primary">
-              {busy === "open" ? "Processing…" : isCreator ? "Open for investigations" : "Bounty funded — awaiting creator to open"}
+              {busy === "open" ? "Processing…" : "Open bounty"}
             </button>
+          )}
+          {isFunded && !isCreator && (
+            <div className="alert alert-warn" style={{ margin: 0 }}>
+              <span>◈</span>
+              <div><strong>Bounty funded — awaiting creator to open</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Investigations open after the creator opens the bounty.</div></div>
+            </div>
           )}
           {isOpen && !isCreator && (
             <div style={{ display: "grid", gap: 8 }}>
+              <h4 style={{ fontSize: 13, fontWeight: 600, margin: 0 }}>Submit an investigation</h4>
               <label className="label" htmlFor="evidence">Your investigation</label>
-              <textarea id="evidence" className="textarea" rows={4} placeholder="Describe your findings, evidence, links…" value={evidence} onChange={(e) => setEvidence(e.target.value)} />
+              <textarea id="evidence" className="textarea" rows={4} placeholder="Describe your findings…" value={evidence} onChange={(e) => setEvidence(e.target.value)} />
               <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>I understand that submitting a fraudulent or misleading investigation may result in loss of my stake.</p>
-              <button disabled={!!busy || !eligibility?.eligible} onClick={submit} className="btn btn-primary">
+              <button disabled={!!busy} onClick={submit} className="btn btn-primary">
                 {busy === "submit" ? "Submitting…" : "Submit investigation"}
               </button>
-              {!eligibility?.eligible && connectedAddr && <div style={{ fontSize: 12, color: "var(--amber)" }}>You’re not currently eligible to submit.</div>}
+              {!connectedAddr && <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Connect your wallet to submit.</div>}
             </div>
           )}
           {isOpen && isCreator && (
             <div style={{ display: "grid", gap: 8 }}>
               <div className="alert alert-warn" style={{ margin: 0 }}>
                 <span>◈</span>
-                <div><strong>Review investigations below</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Select a winner when you’re ready, or reclaim funds if none deserve the reward.</div></div>
+                <div><strong>You created this bounty. You cannot submit an investigation to it.</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Review investigations below and select a winner when ready, or reclaim funds if none deserve the reward.</div></div>
               </div>
               <button disabled={!!busy} onClick={refund} className="btn btn-secondary">
                 {busy === "refund" ? "Reclaiming…" : "No winner — reclaim funds (protocol fee applies)"}
