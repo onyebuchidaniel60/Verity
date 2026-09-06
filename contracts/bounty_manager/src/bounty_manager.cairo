@@ -41,9 +41,12 @@ pub trait IBountyManager<T> {
     fn set_minimum_reputation(ref self: T, threshold: u64);
     fn get_reputation_provider(self: @T) -> ContractAddress;
     fn set_reputation_provider(ref self: T, provider: ContractAddress);
-    // Report / slash
+    // Report / slash with dispute window
     fn report_submission(ref self: T, bounty_id: u64, submission_id: u64, reason: felt252, evidence: felt252);
+    fn challenge_report(ref self: T, bounty_id: u64, submission_id: u64);
+    fn resolve_report(ref self: T, bounty_id: u64, submission_id: u64, should_slash: bool);
     fn get_report(self: @T, bounty_id: u64, submission_id: u64) -> Report;
+    fn withdraw_stake(ref self: T);
     // Deprecated verifier stubs — kept to surface clear error if old frontend calls them
     fn set_verifiers(ref self: T, verifiers: Span<ContractAddress>);
     fn is_verifier(self: @T, account: ContractAddress) -> bool;
@@ -65,6 +68,8 @@ pub mod BountyManager {
     use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess, StoragePointerWriteAccess};
     use super::{IBountyManager, IReputationProviderDispatcher, IReputationProviderDispatcherTrait};
     use crate::types::{Bounty, BountyStatus, Submission, SubmissionStatus, Report};
+
+    const CHALLENGE_PERIOD: u64 = 259200; // 3 days
 
     #[storage]
     struct Storage {
@@ -107,8 +112,11 @@ pub mod BountyManager {
         Paid: Paid,
         Refunded: Refunded,
         Staked: Staked,
+        StakeWithdrawn: StakeWithdrawn,
         ReputationUpdated: ReputationUpdated,
         Reported: Reported,
+        Challenged: Challenged,
+        ReportResolved: ReportResolved,
         Slashed: Slashed,
         StakeAmountUpdated: StakeAmountUpdated,
         ReputationThresholdUpdated: ReputationThresholdUpdated,
@@ -142,7 +150,13 @@ pub mod BountyManager {
     #[derive(Drop, starknet::Event)]
     pub struct Reported { #[key] pub bounty_id: u64, #[key] pub submission_id: u64, pub reporter: ContractAddress, pub reason: felt252 }
     #[derive(Drop, starknet::Event)]
+    pub struct Challenged { #[key] pub bounty_id: u64, #[key] pub submission_id: u64, pub investigator: ContractAddress }
+    #[derive(Drop, starknet::Event)]
+    pub struct ReportResolved { #[key] pub bounty_id: u64, #[key] pub submission_id: u64, pub slashed: bool, pub resolver: ContractAddress }
+    #[derive(Drop, starknet::Event)]
     pub struct Slashed { #[key] pub bounty_id: u64, #[key] pub submission_id: u64, pub investigator: ContractAddress, pub slashed_amount: u128 }
+    #[derive(Drop, starknet::Event)]
+    pub struct StakeWithdrawn { #[key] pub investigator: ContractAddress, pub amount: u128 }
     #[derive(Drop, starknet::Event)]
     pub struct StakeAmountUpdated { pub old: u128, pub new: u128 }
     #[derive(Drop, starknet::Event)]
@@ -434,11 +448,14 @@ pub mod BountyManager {
             self.emit(ReputationProviderUpdated { old, new: provider });
         }
 
-        // Report / slash
+        // Report / slash with dispute window — prevents immediate creator abuse
+        // 1. report_submission: creator reports, creates Report with challenge_deadline = now + 3 days, status Reported, no slashing yet
+        // 2. challenge_report: investigator may challenge within deadline, sets challenged=true
+        // 3. resolve_report: after deadline (or immediately if challenged, only owner may resolve), decides should_slash
         fn report_submission(ref self: ContractState, bounty_id: u64, submission_id: u64, reason: felt252, evidence: felt252) {
             assert(reason.is_non_zero(), 'REASON_ZERO');
             assert(evidence.is_non_zero(), 'EVIDENCE_ZERO');
-            let mut bounty = self.bounties.read(bounty_id);
+            let bounty = self.bounties.read(bounty_id);
             assert(bounty.creator.is_non_zero(), 'BOUNTY_NOT_FOUND');
             assert(bounty.status == BountyStatus::Open, 'NOT_OPEN');
             let caller = get_caller_address();
@@ -447,40 +464,97 @@ pub mod BountyManager {
             assert(submission.investigator.is_non_zero(), 'SUBMISSION_NOT_FOUND');
             assert(submission.status == SubmissionStatus::Pending, 'NOT_PENDING');
             assert(!self.has_reported.read((bounty_id, submission_id)), 'ALREADY_REPORTED');
-            // Create report
-            let report = Report { bounty_id, submission_id, reporter: caller, reason, evidence, timestamp: get_block_timestamp(), resolved: false, slashed: false };
+            let now = get_block_timestamp();
+            let report = Report {
+                bounty_id, submission_id, reporter: caller, reason, evidence,
+                timestamp: now, challenged: false, challenge_deadline: now + CHALLENGE_PERIOD, resolved: false, slashed: false
+            };
             self.reports.write((bounty_id, submission_id), report);
             self.has_reported.write((bounty_id, submission_id), true);
             submission.status = SubmissionStatus::Reported;
             self.submissions.write((bounty_id, submission_id), submission);
             self.emit(Reported { bounty_id, submission_id, reporter: caller, reason });
-            // Immediate slash safeguard: limit to one slash per investigator per bounty, amount is stake, reputation -20
+        }
+
+        fn challenge_report(ref self: ContractState, bounty_id: u64, submission_id: u64) {
+            let mut report = self.reports.read((bounty_id, submission_id));
+            assert(report.reporter.is_non_zero(), 'REPORT_NOT_FOUND');
+            assert(!report.resolved, 'ALREADY_RESOLVED');
+            assert(!report.challenged, 'ALREADY_CHALLENGED');
+            let now = get_block_timestamp();
+            assert(now <= report.challenge_deadline, 'CHALLENGE_EXPIRED');
+            let submission = self.submissions.read((bounty_id, submission_id));
+            assert(submission.investigator.is_non_zero(), 'SUBMISSION_NOT_FOUND');
+            let caller = get_caller_address();
+            assert(caller == submission.investigator, 'NOT_INVESTIGATOR');
+            report.challenged = true;
+            self.reports.write((bounty_id, submission_id), report);
+            self.emit(Challenged { bounty_id, submission_id, investigator: caller });
+        }
+
+        fn resolve_report(ref self: ContractState, bounty_id: u64, submission_id: u64, should_slash: bool) {
+            let mut report = self.reports.read((bounty_id, submission_id));
+            assert(report.reporter.is_non_zero(), 'REPORT_NOT_FOUND');
+            assert(!report.resolved, 'ALREADY_RESOLVED');
+            let now = get_block_timestamp();
+            let caller = get_caller_address();
+            let bounty = self.bounties.read(bounty_id);
+            let is_owner = caller == self.owner.read();
+            let is_creator = caller == bounty.creator;
+            // If challenged, only owner may resolve (prevents creator from overriding challenge)
+            // If not challenged, creator or owner may resolve after deadline, or owner may resolve early
+            if report.challenged {
+                assert(is_owner, 'NOT_OWNER_FOR_CHALLENGED');
+            } else {
+                // Not challenged: allow creator or owner after deadline, or owner early
+                if !is_owner {
+                    assert(is_creator, 'NOT_AUTHORIZED');
+                    assert(now > report.challenge_deadline, 'CHALLENGE_PERIOD_ACTIVE');
+                }
+            }
+            let submission = self.submissions.read((bounty_id, submission_id));
             let investigator = submission.investigator;
-            assert(!self.is_slashed_map.read(investigator), 'ALREADY_SLASHED');
-            // Prevent creator abuse: only allow slash if submission was Pending and now Reported, and not already slashed
-            let old_rep = self._get_reputation(investigator);
-            let new_rep = if old_rep >= 20 { old_rep - 20 } else { 0 };
-            self.reputation.write(investigator, new_rep);
-            self.is_slashed_map.write(investigator, true);
-            // Optionally clear stake? Keep stake but mark slashed; future submits will fail due to is_slashed check
-            self.emit(ReputationUpdated { account: investigator, old_score: old_rep, new_score: new_rep, reason: 'SLASHED' });
-            let stake_amt = self.stake_balances.read(investigator);
-            self.emit(Slashed { bounty_id, submission_id, investigator, slashed_amount: stake_amt });
-            // Mark report as resolved/slashed
-            let mut r = self.reports.read((bounty_id, submission_id));
-            r.resolved = true;
-            r.slashed = true;
-            self.reports.write((bounty_id, submission_id), r);
-            // Update submission to Slashed
-            let mut sub2 = self.submissions.read((bounty_id, submission_id));
-            sub2.status = SubmissionStatus::Slashed;
-            self.submissions.write((bounty_id, submission_id), sub2);
+            report.resolved = true;
+            report.slashed = should_slash;
+            self.reports.write((bounty_id, submission_id), report);
+            self.emit(ReportResolved { bounty_id, submission_id, slashed: should_slash, resolver: caller });
+            if should_slash {
+                assert(!self.is_slashed_map.read(investigator), 'ALREADY_SLASHED');
+                let old_rep = self._get_reputation(investigator);
+                let new_rep = if old_rep >= 20 { old_rep - 20 } else { 0 };
+                self.reputation.write(investigator, new_rep);
+                self.is_slashed_map.write(investigator, true);
+                self.emit(ReputationUpdated { account: investigator, old_score: old_rep, new_score: new_rep, reason: 'SLASHED' });
+                let stake_amt = self.stake_balances.read(investigator);
+                self.emit(Slashed { bounty_id, submission_id, investigator, slashed_amount: stake_amt });
+                let mut sub = self.submissions.read((bounty_id, submission_id));
+                sub.status = SubmissionStatus::Slashed;
+                self.submissions.write((bounty_id, submission_id), sub);
+            } else {
+                // Not slashed: return to Rejected (or Pending? We mark Rejected to indicate report was dismissed)
+                let mut sub = self.submissions.read((bounty_id, submission_id));
+                sub.status = SubmissionStatus::Rejected;
+                self.submissions.write((bounty_id, submission_id), sub);
+            }
         }
 
         fn get_report(self: @ContractState, bounty_id: u64, submission_id: u64) -> Report {
             let r = self.reports.read((bounty_id, submission_id));
             assert(r.reporter.is_non_zero(), 'REPORT_NOT_FOUND');
             r
+        }
+
+        fn withdraw_stake(ref self: ContractState) {
+            let caller = get_caller_address();
+            assert(self.has_staked.read(caller), 'NOT_STAKED');
+            assert(!self.is_slashed_map.read(caller), 'IS_SLASHED_CANNOT_WITHDRAW');
+            let amount = self.stake_balances.read(caller);
+            assert(amount.is_non_zero(), 'NO_STAKE_BALANCE');
+            // For MVP, stake is just a flag; we clear it and allow re-staking later if desired
+            // In a real STRK-locking version, this would transfer STRK back to caller via ERC20
+            self.has_staked.write(caller, false);
+            self.stake_balances.write(caller, 0);
+            self.emit(StakeWithdrawn { investigator: caller, amount });
         }
 
         // Deprecated verifier stubs

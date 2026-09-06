@@ -22,11 +22,20 @@
       "verified": true
     },
     {
-      "name": "BountyManager",
+      "name": "BountyManager (V1, verifier model)",
       "address": "0x07e239e86b6fe72dc205146bfff8b1c94d8c3e79a23b52bc85269906aec56da1",
       "class_hash": "0x2ff19b874887c6e693d0298997422626d52a736eb1b4426a3fd3f11b6fed61f",
       "declare_tx": "0x473aae6304648f207293fba424ae0b19f88e854dec2b7e4427bb19f418f10ee",
       "deploy_tx": "0x069c3cbdafc257c781924c0b922daf772d1095e6d91f0ecd6e44ab74ef91bb38",
+      "network": "sepolia",
+      "verified": true
+    },
+    {
+      "name": "BountyManager V2 (creator-controlled, staking & reputation)",
+      "address": "0x03643a1e507bc076e6831b31be17f08bc9c1487583c55af313bc17958e9c4b54",
+      "class_hash": "0x71241365558230fbaf6c6462c0577bc321b3f68ca0e39ec3113609dacee303",
+      "declare_tx": "0x28a575fa20aae3936b8179a6fe7d082304881bb9c72640246ba344a9b2344e4",
+      "deploy_tx": "0x00f7cded0dbdf9bf4bc7d50ff6151489b0b63d88383aeb40c92f959541a27656",
       "network": "sepolia",
       "verified": true
     }
@@ -104,12 +113,132 @@
     },
     {
       "hash": "0x0643a3abaafad4be6b31862f693410b1b23e6d5758c7064f95ec60a3a216c464",
-      "type": "submit_evidence #1",
+      "type": "submit_evidence #1 (V1)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x28a575fa20aae3936b8179a6fe7d082304881bb9c72640246ba344a9b2344e4",
+      "type": "declare BountyManager V2 (staking & reputation, no verifiers)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x00f7cded0dbdf9bf4bc7d50ff6151489b0b63d88383aeb40c92f959541a27656",
+      "type": "deploy BountyManager V2",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x06743c1372faeed8a51b349ddbd52e010835e2ec541de08fe1df48aa8590409f",
+      "type": "set_anonymizer V2 -> VerityAnonymizer 0x04b93a...",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x0125bcba9455e369cb1e8c083511e7b6cfd2231a7fcfac478997e534580effc9",
+      "type": "set_bounty_manager VerityAnonymizer -> V2",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x04313491164604e4df7fb81311412f2eaf2066816a74d83a66cc87486ea4ddfb",
+      "type": "create_bounty V2 #1 (0.1 STRK)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x020d9194b19e6a18c1b95ff09672428d506720b41dd5b040b3ca8aa46a74f605",
+      "type": "set_anonymizer V2 -> ready-sepolia (for fund simulation)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x029057993754e1f27f23f811134a63e6e679fd892cb207cad9a513fcfb868ac6",
+      "type": "fund_bounty V2 #1 (0.1 STRK) via simulation",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x04b9a97a329ad712673c4bbc0607ef6ade8e6c22910bce0612277f276e71b815",
+      "type": "restore anonymizer V2",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x038f10dc2683daa5a4390e0723abbc9e171caf260da97e2e45523eb83049951c",
+      "type": "open_bounty V2 #1",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x0516f5c367539416294db8a9aa0c6d2b9e21556fbbb4e23589bdfc3bc05b3449",
+      "type": "transfer STRK 5 to investigator-sepolia 0x025c19...",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x460e63b08599b5b33ea69a71c9bd261b92c4cd27c15e4cc15454912dcbf82f0",
+      "type": "deploy investigator-sepolia account",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x03c8eb85fd2420c12dab5a3e32f0ea5558d0620101d03ba25319b4817dfd4d8d",
+      "type": "stake investigator-sepolia (1 STRK, rep 60)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x0069fbf426fbf587eb7dd8bda6fd8ebd6c7cc86fa14a35a6ce74c5a1b4d6fe92",
+      "type": "submit_investigation V2 #1 by investigator",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x049cf19144808c0facf7d2752291aa62e7e8d93d540db4ab439dc68770e762b1",
+      "type": "select_winner V2 #1 (investigator)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x06c4ca9c04c9e42a2bdbc5125be683944be0de8cba236e52954637f8a571d618",
+      "type": "claim_payout V2 #1 by winner",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x00ba31ec309fcb1c02c7d3d447863d13a3a516a276e35c3ff4105f78fea05caf",
+      "type": "create_bounty V2 #2 (0.2 STRK)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x029b00d97d1092c965d7ce956afa3a7bd48bd48a7c149fddea9788b4350e0717",
+      "type": "refund_bounty V2 #2 (no winner, fee 5%)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x0285189f52b231edd304dc9520ac0eb00513b4fc3c49441cebad277c30d3eb48",
+      "type": "report_submission V2 #3 (bad evidence)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x03a672e30af33609d0048ab11f8c3878579b7d45b1a491e0b9ba53405a634d6b",
+      "type": "challenge_report V2 #3 by investigator (dispute window)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x0698756a44ddb091bb9c63a8f0a3cdde7cf75ff24bb94776c893665e29c88b09",
+      "type": "resolve_report V2 #3 (owner slashes, rep 70→50, Slashed)",
       "network": "sepolia",
       "status": "ACCEPTED_ON_L2"
     }
   ],
   "demo_video": "",
   "demo_url": "",
-  "notes": "Sepolia verification complete. Mainnet deployment pending Phase 7. All transactions verifiable at https://sepolia.voyager.online/tx/<hash>"
+  "notes": "Sepolia V2 verification: BountyManager V2 0x03643a... (staking 1 STRK, rep 60, V2) + VerityAnonymizer 0x04b93a... + pool 0x0254... Private funding/payout via STRK20 preserved. Creator-controlled, no verifiers. All V2 transactions verifiable at https://sepolia.voyager.online/tx/<hash>. Mainnet pending."
 }

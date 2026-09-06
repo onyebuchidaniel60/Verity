@@ -139,7 +139,7 @@ fn test_double_stake_rejected() {
 }
 
 #[test]
-fn test_report_and_slash() {
+fn test_report_and_slash_with_dispute() {
     let (bm_addr, bm) = deploy_bounty_manager();
     let pool_addr = pool();
     let anon_addr = anon_addr_for_test(pool_addr);
@@ -160,15 +160,110 @@ fn test_report_and_slash() {
     let sid = bm.submit_investigation(bid, 'bad_evidence');
     stop_cheat_caller_address(bm_addr);
     let rep_before = bm.get_reputation(investigator());
-    // Creator reports bad submission
+    // Creator reports — no slash yet, status Reported, challenge window open
     start_cheat_caller_address(bm_addr, creator());
     bm.report_submission(bid, sid, 'FRAUD', 'proof');
     stop_cheat_caller_address(bm_addr);
-    assert(bm.is_slashed(investigator()), 'not slashed');
+    assert(!bm.is_slashed(investigator()), 'should not be slashed yet');
+    let sub_reported = bm.get_submission(bid, sid);
+    assert(sub_reported.status == SubmissionStatus::Reported, 'not Reported');
+    // Investigator challenges within period
+    start_cheat_caller_address(bm_addr, investigator());
+    bm.challenge_report(bid, sid);
+    stop_cheat_caller_address(bm_addr);
+    let rep_mid = bm.get_reputation(investigator());
+    assert(rep_mid == rep_before, 'rep unchanged');
+    // Owner resolves after challenge — decides to slash (malicious confirmed)
+    start_cheat_caller_address(bm_addr, owner());
+    bm.resolve_report(bid, sid, true);
+    stop_cheat_caller_address(bm_addr);
+    assert(bm.is_slashed(investigator()), 'not slashed after resolve');
     let rep_after = bm.get_reputation(investigator());
     assert(rep_after < rep_before, 'rep not reduced');
     let sub = bm.get_submission(bid, sid);
     assert(sub.status == SubmissionStatus::Slashed, 'not Slashed');
+}
+
+#[test]
+fn test_report_without_challenge_then_slash() {
+    let (bm_addr, bm) = deploy_bounty_manager();
+    let pool_addr = pool();
+    let anon_addr = anon_addr_for_test(pool_addr);
+    start_cheat_caller_address(bm_addr, owner());
+    bm.set_anonymizer(anon_addr);
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, creator());
+    let bid = bm.create_bounty(500, 'm');
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, anon_addr);
+    bm.fund_bounty(bid, 500);
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, creator());
+    bm.open_bounty(bid);
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, investigator());
+    bm.stake();
+    let sid = bm.submit_investigation(bid, 'bad');
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, creator());
+    bm.report_submission(bid, sid, 'FRAUD', 'proof');
+    stop_cheat_caller_address(bm_addr);
+    // Warp time beyond challenge period (3 days + 1)
+    snforge_std::start_cheat_block_timestamp(bm_addr, 259201);
+    start_cheat_caller_address(bm_addr, creator());
+    bm.resolve_report(bid, sid, true);
+    stop_cheat_caller_address(bm_addr);
+    snforge_std::stop_cheat_block_timestamp(bm_addr);
+    assert(bm.is_slashed(investigator()), 'not slashed after deadline');
+}
+
+#[test]
+fn test_report_challenged_then_dismissed() {
+    let (bm_addr, bm) = deploy_bounty_manager();
+    let pool_addr = pool();
+    let anon_addr = anon_addr_for_test(pool_addr);
+    start_cheat_caller_address(bm_addr, owner());
+    bm.set_anonymizer(anon_addr);
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, creator());
+    let bid = bm.create_bounty(500, 'm');
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, anon_addr);
+    bm.fund_bounty(bid, 500);
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, creator());
+    bm.open_bounty(bid);
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, investigator());
+    bm.stake();
+    let sid = bm.submit_investigation(bid, 'maybe_bad');
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, creator());
+    bm.report_submission(bid, sid, 'FRAUD', 'proof');
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, investigator());
+    bm.challenge_report(bid, sid);
+    stop_cheat_caller_address(bm_addr);
+    // Owner dismisses (should_slash false) — no slash, reputation unchanged, status Rejected
+    let rep_before = bm.get_reputation(investigator());
+    start_cheat_caller_address(bm_addr, owner());
+    bm.resolve_report(bid, sid, false);
+    stop_cheat_caller_address(bm_addr);
+    assert(!bm.is_slashed(investigator()), 'should not be slashed');
+    assert(bm.get_reputation(investigator()) == rep_before, 'rep should not change');
+    let sub = bm.get_submission(bid, sid);
+    assert(sub.status == SubmissionStatus::Rejected, 'not Rejected');
+}
+
+#[test]
+fn test_stake_withdraw() {
+    let (bm_addr, bm) = deploy_bounty_manager();
+    start_cheat_caller_address(bm_addr, investigator());
+    bm.stake();
+    assert(bm.has_stake(investigator()), 'not staked');
+    bm.withdraw_stake();
+    assert(!bm.has_stake(investigator()), 'still staked');
+    stop_cheat_caller_address(bm_addr);
 }
 
 #[test]

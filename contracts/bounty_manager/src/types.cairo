@@ -57,6 +57,8 @@ pub struct Submission {
 }
 
 /// Report for malicious/fraudulent investigation — creator-originated, safeguards against abuse.
+/// Two-step: Reported → (Investigator may challenge within CHALLENGE_PERIOD) → Resolved/Slashed.
+/// This prevents a malicious creator from instantly stealing stake; a dispute window and owner arbitration are required.
 #[derive(Copy, Drop, Serde, starknet::Store, PartialEq, Debug)]
 pub struct Report {
     pub bounty_id: u64,
@@ -65,6 +67,8 @@ pub struct Report {
     pub reason: felt252,
     pub evidence: felt252,
     pub timestamp: u64,
+    pub challenged: bool,
+    pub challenge_deadline: u64,
     pub resolved: bool,
     pub slashed: bool,
 }

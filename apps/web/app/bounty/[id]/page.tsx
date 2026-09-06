@@ -117,6 +117,7 @@ export default function BountyDetailPage() {
   const [stakeInfo, setStakeInfo] = useState<{ hasStake: boolean; stakeAmount: string; reputation: number; minRep: number; isSlashed: boolean } | null>(null);
   const [reportReason, setReportReason] = useState("");
   const [selectedSubmission, setSelectedSubmission] = useState<number | null>(null);
+  const [reportsMap, setReportsMap] = useState<Record<number, any>>({});
 
   const walletStoreAddr = useWalletStore((s) => s.address);
   const walletConnected = useWalletStore((s) => s.connected);
@@ -171,6 +172,20 @@ export default function BountyDetailPage() {
           } catch {}
         }
         setSubmissions(list);
+        // Load reports for dispute UI
+        try {
+          const repAbi2 = [{ name: "get_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ type: "Report" }], stateMutability: "view" }] as const;
+          const cRep = new Contract({ abi: repAbi2 as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+          const rMap: Record<number, any> = {};
+          for (let i = 1; i <= list.length; i++) {
+            try {
+              const rr: any = await cRep.call("get_report", [id, i]);
+              const rep = rr?.report ?? rr;
+              if (rep && (rep.reporter ?? rep[2])) rMap[i] = rep;
+            } catch {}
+          }
+          setReportsMap(rMap);
+        } catch {}
       } catch {}
       // Load stake/reputation if connected
       if (walletStoreAddr) {
@@ -403,6 +418,36 @@ export default function BountyDetailPage() {
       return res.transaction_hash ?? res.hash;
     });
 
+  const challenge = (submissionId: number) =>
+    guard("challenge", async () => {
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const c = new Contract({ abi: [{ name: "challenge_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("challenge_report", [id, submissionId]);
+      return res.transaction_hash ?? res.hash;
+    });
+
+  const resolve = (submissionId: number, shouldSlash: boolean) =>
+    guard("resolve", async () => {
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const c = new Contract({ abi: [{ name: "resolve_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "should_slash", type: "core::bool" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("resolve_report", [id, submissionId, shouldSlash]);
+      return res.transaction_hash ?? res.hash;
+    });
+
+  const withdrawStake = () =>
+    guard("withdraw", async () => {
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const c = new Contract({ abi: [{ name: "withdraw_stake", type: "function", inputs: [], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("withdraw_stake", []);
+      return res.transaction_hash ?? res.hash;
+    });
+
   const refund = () =>
     guard("refund", async () => {
       const { wallet } = await connectWallet();
@@ -615,6 +660,11 @@ export default function BountyDetailPage() {
                   {busy === "stake" ? "Staking…" : `Stake ${eligibility.stakeAmountStr} to become eligible`}
                 </button>
               )}
+              {eligibility.hasStake && !eligibility.isSlashed && (
+                <button disabled={!!busy} onClick={withdrawStake} className="btn btn-ghost" style={{ marginTop: 8, fontSize: 12 }}>
+                  {busy === "withdraw" ? "Withdrawing…" : "Withdraw stake"}
+                </button>
+              )}
             </div>
           )}
           {eligibility && !eligibility.eligible && !eligibility.isSlashed && (
@@ -769,8 +819,8 @@ export default function BountyDetailPage() {
                   <div style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8, wordBreak: "break-all" }}>
                     {String(s.evidence_hash).slice(0, 64)}…
                   </div>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {isCreator && isOpen && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    {isCreator && isOpen && statusLabel === "Pending" && (
                       <>
                         <button disabled={!!busy} onClick={() => selectWinner(Number(s.id))} className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12 }}>
                           {busy === "select" && selectedSubmission === Number(s.id) ? "Selecting…" : "Select winner"}
@@ -778,10 +828,10 @@ export default function BountyDetailPage() {
                         <button
                           disabled={!!busy}
                           onClick={() => {
-                            const reason = prompt("Reason for reporting this investigation (will be recorded on-chain):");
+                            const reason = prompt("Reason for reporting this investigation (will be recorded on-chain, investigator can challenge within 3 days):");
                             if (reason) {
                               setReportReason(reason);
-                              report(Number(s.id));
+                              setTimeout(() => report(Number(s.id)), 100);
                             }
                           }}
                           className="btn btn-secondary"
@@ -790,6 +840,34 @@ export default function BountyDetailPage() {
                           Report
                         </button>
                       </>
+                    )}
+                    {statusLabel === "Reported" && isOwn && (
+                      <button disabled={!!busy} onClick={() => challenge(Number(s.id))} className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: 12, borderColor: "var(--amber-border)", color: "var(--amber)" }}>
+                        {busy === "challenge" ? "Challenging…" : "Challenge report (3-day window)"}
+                      </button>
+                    )}
+                    {statusLabel === "Reported" && (isCreator || connectedAddr === "0x100") && (
+                      <>
+                        <button disabled={!!busy} onClick={() => resolve(Number(s.id), true)} className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12, background: "var(--red)", borderColor: "var(--red)", color: "#fff" }}>
+                          {busy === "resolve" ? "Resolving…" : "Confirm slash"}
+                        </button>
+                        <button disabled={!!busy} onClick={() => resolve(Number(s.id), false)} className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12 }}>
+                          Dismiss report
+                        </button>
+                      </>
+                    )}
+                    {reportsMap[Number(s.id)] && (
+                      <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: 4 }}>
+                        {(() => {
+                          const r = reportsMap[Number(s.id)] as any;
+                          const challenged = r?.challenged ?? false;
+                          const resolved = r?.resolved ?? false;
+                          const slashed = r?.slashed ?? false;
+                          if (resolved) return slashed ? "Resolved: slashed" : "Resolved: dismissed";
+                          if (challenged) return "Challenged — awaiting owner";
+                          return "Reported — awaiting resolution (3-day challenge)";
+                        })()}
+                      </span>
                     )}
                     <button onClick={() => setSelectedSubmission(selectedSubmission === Number(s.id) ? null : Number(s.id))} className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12 }}>
                       {selectedSubmission === Number(s.id) ? "Hide" : "Read investigation"}

@@ -14,7 +14,7 @@ export interface VerityContractRegistry {
 
 export const CONTRACTS: VerityContractRegistry = {
   bountyManager:
-    process.env.NEXT_PUBLIC_BOUNTY_MANAGER_ADDRESS || "0x07e239e86b6fe72dc205146bfff8b1c94d8c3e79a23b52bc85269906aec56da1",
+    process.env.NEXT_PUBLIC_BOUNTY_MANAGER_ADDRESS || "0x03643a1e507bc076e6831b31be17f08bc9c1487583c55af313bc17958e9c4b54",
   verityAnonymizer:
     process.env.NEXT_PUBLIC_VERITY_ANONYMIZER_ADDRESS || "0x04b93a8628d6f905854f54bf3f5a1098cc41273b7dc54d56815e4dda62c0ae4b",
 };
