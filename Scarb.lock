@@ -182,6 +182,7 @@ dependencies = [
 name = "verity_anonymizer"
 version = "0.1.0"
 dependencies = [
+ "bounty_manager",
  "openzeppelin",
  "privacy",
  "snforge_std",
