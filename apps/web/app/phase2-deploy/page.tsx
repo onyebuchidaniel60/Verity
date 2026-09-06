@@ -45,11 +45,13 @@ export default function Phase2DeployPage() {
   const [deployFee, setDeployFee] = useState<string | null>(null);
   const [walletApiVersions, setWalletApiVersions] = useState<string[] | null>(null);
   const [step, setStep] = useState<string>("idle");
+  const [diagnoseLog, setDiagnoseLog] = useState<string | null>(null);
 
   // Keep the WalletAccount for declare/deploy — do not touch Phase1's accountRef.
   // We store it in a ref-like state via closure; simplest is to keep in a module ref.
   // For this isolated page we keep it in state as any (WalletAccountV6 extends WalletAccountV5 -> Account).
   const [account, setAccount] = useState<any>(null);
+  const [walletObj, setWalletObj] = useState<any>(null);
 
   async function guard(fn: () => Promise<void>) {
     setBusy(true);
@@ -70,6 +72,8 @@ export default function Phase2DeployPage() {
       const cap = await detectStrk20Capability(wallet);
       setWalletApiVersions(cap.walletApiVersions);
       console.info("[phase2-deploy] wallet connected", { walletName: wName, address, chainId: cId, walletApiVersions: cap.walletApiVersions, supported: cap.supported });
+      // Keep wallet object for direct Wallet API diagnosis (bypass starknet.js wrapper if needed)
+      setWalletObj(wallet);
       if (!cap.supported) throw new Error(`Wallet API ${cap.walletApiVersions.join(",")} < 0.10.3`);
       const acc = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       // Also create a generic provider for fee checks
@@ -179,38 +183,65 @@ export default function Phase2DeployPage() {
   const doDeclare = () =>
     guard(async () => {
       if (!account) throw new Error("Connect wallet first");
+      if (!walletObj) throw new Error("Wallet object not available — reconnect");
       setStep("declare — awaiting Ready X signature");
       const [sierraRes, casmRes] = await Promise.all([fetch(SIERRA_URL), fetch(CASM_URL)]);
       const sierra = await sierraRes.json();
       const casm = await casmRes.json();
-      // Log exact Wallet API payload that starknet.js will send to Ready X
-      // WalletAccountV5.declare does: extractContractHashes({contract,casm}) -> {compiledClassHash, contract_class: {abi: stringified}} -> wallet_addDeclareTransaction {compiled_class_hash, contract_class}
-      // We replicate the extraction here for logging without sending yet
+      // --- PRE-REQUEST LOGS (as requested) ---
+      let computedClassHash: string | null = null;
+      let computedCompiledHash: string | null = null;
+      let contractClassVersion: string | null = null;
       try {
         const { hash } = await import("starknet");
-        const computedClassHash = (hash as any).computeContractClassHash?.(sierra);
-        const computedCompiledHash = (hash as any).computeCompiledClassHash?.(casm);
-        console.info("[phase2-deploy] declare payload preview", {
-          sierra_abi_len: sierra.abi?.length,
-          sierra_program_len: sierra.sierra_program?.length,
-          compiledClassHash: computedCompiledHash,
-          classHash: computedClassHash,
-          contract_class_preview: { abi: typeof sierra.abi === "string" ? sierra.abi.slice(0, 100) : JSON.stringify(sierra.abi).slice(0, 200) },
+        computedClassHash = (hash as any).computeContractClassHash?.(sierra) ?? null;
+        computedCompiledHash = (hash as any).computeCompiledClassHash?.(casm) ?? null;
+        contractClassVersion = sierra.contract_class_version ?? sierra.contract_class_version ?? null;
+        // Also try to get version from sierra json directly
+        if (!contractClassVersion && sierra.abi) contractClassVersion = "0.1.0 (from sierra)";
+        console.info("[phase2-deploy][PRE] wallet_addDeclareTransaction — exact type", "wallet_addDeclareTransaction");
+        console.info("[phase2-deploy][PRE] exact params structure", {
+          type: "wallet_addDeclareTransaction",
+          params: {
+            compiled_class_hash: computedCompiledHash,
+            contract_class: {
+              // starknet.js sends { ...sierra, abi: stringified } — log the exact shape
+              sierra_program_length: sierra.sierra_program?.length,
+              contract_class_version: sierra.contract_class_version,
+              entry_points_by_type: Object.keys(sierra.entry_points_by_type ?? {}),
+              abi_length: sierra.abi?.length,
+              abi_preview: typeof sierra.abi === "string" ? sierra.abi.slice(0, 120) : JSON.stringify(sierra.abi).slice(0, 200),
+            },
+          },
         });
-        // Also log what starknet.js will actually send (extracted)
-        // The wallet request is: { type: "wallet_addDeclareTransaction", params: { compiled_class_hash, contract_class: { ...sierra, abi: stringified } } }
-        console.info("[phase2-deploy] wallet_addDeclareTransaction params preview", {
-          compiled_class_hash: computedCompiledHash,
-          contract_class: { ...sierra, abi: typeof sierra.abi === "string" ? sierra.abi.slice(0, 100) + "..." : `${sierra.abi?.length} abi entries` },
-        });
+        console.info("[phase2-deploy][PRE] compiled_class_hash", computedCompiledHash);
+        console.info("[phase2-deploy][PRE] contract_class_version", contractClassVersion ?? sierra.contract_class_version ?? "unknown");
+        console.info("[phase2-deploy][PRE] chainId", chainId, "account address", walletAddr, "wallet", walletName, "walletApiVersions", walletApiVersions);
+        // Log fee estimation vs balance before request
+        if (balance && declareFee) {
+          try {
+            const balBig = BigInt(balance.replace(/[^0-9]/g, "") || "0");
+            // Try to extract overall_fee from declareFee JSON
+            let feeBig: bigint | null = null;
+            try {
+              const parsed = JSON.parse(declareFee);
+              const feeStr = parsed.overall_fee ?? parsed.suggestedMaxFee ?? parsed.max_fee ?? parsed.execution_resources?.overall_fee ?? null;
+              if (feeStr) feeBig = BigInt(String(feeStr).replace(/[^0-9]/g, ""));
+            } catch {}
+            if (feeBig !== null) {
+              const remaining = balBig - feeBig;
+              console.info("[phase2-deploy][PRE] balance - estimated declare fee", { balance: balBig.toString(), fee: feeBig.toString(), remaining: remaining.toString(), remainingFRI: remaining.toString(), wouldBeNegative: remaining < 0n });
+            }
+          } catch (e) {
+            console.warn("[phase2-deploy][PRE] balance - fee calc failed", e);
+          }
+        }
       } catch (e) {
-        console.warn("[phase2-deploy] payload preview failed", e);
+        console.warn("[phase2-deploy][PRE] payload preview failed", e);
       }
       // Check if class already declared before sending — if so, wallet will grey out Confirm
       try {
         const provider = createProvider(NETWORK);
-        const { hash } = await import("starknet");
-        const computedClassHash = (hash as any).computeContractClassHash?.(sierra);
         if (computedClassHash) {
           try {
             const existing = await provider.getClassByHash(computedClassHash);
@@ -222,23 +253,30 @@ export default function Phase2DeployPage() {
           } catch {}
         }
       } catch {}
-      // Log chainId and account before sending
-      console.info("[phase2-deploy] declare account", { address: walletAddr, chainId, walletName });
       let res: any;
+      let walletError: any = null;
+      const startTime = Date.now();
       try {
-        // This triggers Ready X wallet_addDeclareTransaction
+        // This triggers Ready X wallet_addDeclareTransaction via starknet.js wrapper
+        console.info("[phase2-deploy][REQUEST] calling account.declare({ contract: sierra, casm }) — this will show Ready X prompt");
         res = await account.declare({ contract: sierra, casm });
-        console.info("[phase2-deploy] wallet_addDeclareTransaction response", res);
+        console.info("[phase2-deploy][RESPONSE] wallet_addDeclareTransaction returned", res, "elapsedMs", Date.now() - startTime);
+        console.info("[phase2-deploy][RESPONSE] error object", null, "code", (res as any)?.code ?? "n/a", "message", (res as any)?.message ?? "n/a", "data", (res as any)?.data ?? "n/a");
       } catch (e: any) {
+        walletError = e;
         // Capture exact wallet error — Ready X may return { code, message, data } or throw
-        console.error("[phase2-deploy] wallet_addDeclareTransaction error", e, "code", e?.code, "data", e?.data, "message", e?.message);
-        // Also log the full error object for browser console inspection
+        console.error("[phase2-deploy][RESPONSE] wallet_addDeclareTransaction error", e, "code", e?.code, "data", e?.data, "message", e?.message, "elapsedMs", Date.now() - startTime);
+        console.error("[phase2-deploy][RESPONSE] full error object", JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+        setDiagnoseLog(
+          `type: wallet_addDeclareTransaction\nparams: { compiled_class_hash: ${computedCompiledHash}, contract_class_version: ${contractClassVersion}, chainId: ${chainId}, account: ${walletAddr} }\nerror code: ${e?.code ?? "n/a"}\nerror message: ${e?.message ?? String(e)}\nerror data: ${JSON.stringify(e?.data ?? e?.cause ?? e, null, 2)}\ncomputedClassHash: ${computedClassHash ?? "n/a"}\ncompiledClassHash: ${computedCompiledHash ?? "n/a"}`,
+        );
         throw new Error(
-          `wallet_addDeclareTransaction failed: ${e?.message ?? String(e)} | code: ${e?.code ?? "n/a"} | data: ${JSON.stringify(e?.data ?? e?.cause ?? "")} | payload: sierra ${sierra.abi?.length} entries, casm ${JSON.stringify(casm).length} chars | classHash preview ${res?.class_hash ?? "n/a"}`,
+          `wallet_addDeclareTransaction failed: ${e?.message ?? String(e)} | code: ${e?.code ?? "n/a"} | data: ${JSON.stringify(e?.data ?? e?.cause ?? "")} | payload: sierra ${sierra.abi?.length} entries, casm ${JSON.stringify(casm).length} chars | classHash ${computedClassHash ?? "n/a"} | compiled ${computedCompiledHash ?? "n/a"} | chainId ${chainId} | account ${walletAddr}`,
         );
       }
       const txHash = res.transaction_hash ?? res.transactionHash ?? res.hash;
-      const cHash = res.class_hash ?? res.classHash ?? res.class_hash;
+      const cHash = res.class_hash ?? res.classHash ?? res.class_hash ?? computedClassHash;
+      console.info("[phase2-deploy][RESPONSE] parsed txHash", txHash, "classHash", cHash);
       if (!txHash) throw new Error(`Declare returned no transaction_hash: ${JSON.stringify(res)}`);
       setDeclareHash(txHash);
       if (cHash) setClassHash(cHash);
@@ -248,6 +286,67 @@ export default function Phase2DeployPage() {
         try {
           await provider.waitForTransaction(txHash);
         } catch {}
+      }
+    });
+
+  const diagnoseDirectDeclare = () =>
+    guard(async () => {
+      if (!walletObj) throw new Error("Connect wallet first — wallet object required for direct Wallet API");
+      if (!account) throw new Error("Connect wallet first");
+      setDiagnoseLog(null);
+      setStep("diagnose direct wallet_addDeclareTransaction");
+      const [sierraRes, casmRes] = await Promise.all([fetch(SIERRA_URL), fetch(CASM_URL)]);
+      const sierra = await sierraRes.json();
+      const casm = await casmRes.json();
+      const { hash } = await import("starknet");
+      const computedClassHash = (hash as any).computeContractClassHash?.(sierra) ?? "n/a";
+      const computedCompiledHash = (hash as any).computeCompiledClassHash?.(casm) ?? "n/a";
+      const params = {
+        compiled_class_hash: computedCompiledHash,
+        contract_class: { ...sierra, abi: JSON.stringify(sierra.abi) },
+      };
+      console.info("[phase2-deploy][DIRECT][PRE] type", "wallet_addDeclareTransaction");
+      console.info("[phase2-deploy][DIRECT][PRE] params", params);
+      console.info("[phase2-deploy][DIRECT][PRE] compiled_class_hash", computedCompiledHash, "contract_class_version", sierra.contract_class_version, "chainId", chainId, "account", walletAddr, "walletApiVersions", walletApiVersions);
+      // Balance - fee calc before direct call
+      if (balance) {
+        try {
+          const balBig = BigInt(String(balance).replace(/[^0-9]/g, "") || "0");
+          let feeBig: bigint | null = null;
+          if (declareFee) {
+            try {
+              const parsed = JSON.parse(declareFee);
+              const feeStr = parsed.overall_fee ?? parsed.suggestedMaxFee ?? "";
+              if (feeStr) feeBig = BigInt(String(feeStr).replace(/[^0-9]/g, ""));
+            } catch {}
+          }
+          if (feeBig !== null) {
+            const rem = balBig - feeBig;
+            console.info("[phase2-deploy][DIRECT][PRE] balance - fee", { balance: balBig.toString(), fee: feeBig.toString(), remaining: rem.toString() });
+            setDiagnoseLog(`Direct call preview — type: wallet_addDeclareTransaction\ncompiled_class_hash: ${computedCompiledHash}\nclass_hash: ${computedClassHash}\nchainId: ${chainId}\naccount: ${walletAddr}\nbalance: ${balBig.toString()}\nestimated fee: ${feeBig.toString()}\nremaining: ${rem.toString()} (${rem < 0n ? "INSUFFICIENT" : "sufficient"})`);
+          }
+        } catch {}
+      }
+      // Direct Wallet API call bypassing starknet.js wrapper — for diagnosis only, still shows Ready X prompt but we log raw response
+      console.info("[phase2-deploy][DIRECT][REQUEST] wallet.features[\"starknet:walletApi\"].request({ type: \"wallet_addDeclareTransaction\", params })");
+      let directRes: any = null;
+      let directErr: any = null;
+      try {
+        directRes = await (walletObj as any).features["starknet:walletApi"].request({
+          type: "wallet_addDeclareTransaction",
+          params,
+        });
+        console.info("[phase2-deploy][DIRECT][RESPONSE] returned", directRes);
+      } catch (e: any) {
+        directErr = e;
+        console.error("[phase2-deploy][DIRECT][RESPONSE] error", e, "code", e?.code, "message", e?.message, "data", e?.data);
+      }
+      const log = `DIRECT wallet_addDeclareTransaction:\ntype: wallet_addDeclareTransaction\nparams.compiled_class_hash: ${computedCompiledHash}\nparams.contract_class_version: ${sierra.contract_class_version}\nchainId: ${chainId}\naccount: ${walletAddr}\nwalletApiVersions: ${walletApiVersions?.join(",")}\n\nReturned: ${directRes ? JSON.stringify(directRes, null, 2) : "— (no return, see error)"}\n\nError code: ${directErr?.code ?? "n/a"}\nError message: ${directErr?.message ?? "n/a"}\nError data: ${JSON.stringify(directErr?.data ?? directErr?.cause ?? directErr ?? {}, null, 2)}`;
+      setDiagnoseLog(log);
+      if (directErr) throw new Error(`Direct wallet_addDeclareTransaction failed: ${directErr?.message ?? String(directErr)} | code ${directErr?.code ?? "n/a"} | data ${JSON.stringify(directErr?.data ?? "")}`);
+      if (directRes?.transaction_hash) {
+        setDeclareHash(directRes.transaction_hash);
+        setClassHash(directRes.class_hash ?? computedClassHash);
       }
     });
 
@@ -403,6 +502,35 @@ export default function Phase2DeployPage() {
           <b>10. Estimated fee (before signing):</b> Declare: <code className="break-all">{declareFee ?? "— click Estimate Fees"}</code> · Deploy:{" "}
           <code className="break-all">{deployFee ?? "—"}</code>
         </div>
+        <div>
+          <b>10b. Balance − fee:</b>{" "}
+          {(() => {
+            if (!balance || !declareFee || balance.startsWith("(")) return <span className="opacity-60">— (connect + estimate first)</span>;
+            try {
+              const bal = BigInt(String(balance).replace(/[^0-9]/g, "") || "0");
+              let fee: bigint | null = null;
+              try {
+                const parsed = JSON.parse(declareFee);
+                const raw = parsed.overall_fee ?? parsed.suggestedMaxFee ?? parsed.overallFee ?? null;
+                if (raw) fee = BigInt(String(raw).replace(/[^0-9]/g, ""));
+              } catch {
+                // declareFee may be plain string with fee inside
+                const m = declareFee.match(/(\d{12,})/);
+                if (m) fee = BigInt(m[1]);
+              }
+              if (fee === null) return <span>{balance} − fee (could not parse fee)</span>;
+              const rem = bal - fee;
+              const isNeg = rem < 0n;
+              return (
+                <code className={isNeg ? "text-red-600" : ""}>
+                  {bal.toString()} − {fee.toString()} = {rem.toString()} FRI {isNeg ? "— INSUFFICIENT (needs more STRK)" : "— sufficient"}
+                </code>
+              );
+            } catch {
+              return <span>could not compute</span>;
+            }
+          })()}
+        </div>
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
@@ -421,10 +549,16 @@ export default function Phase2DeployPage() {
         <button className={btn} disabled={busy} onClick={doDeclareAndDeploy}>
           3c · DeclareAndDeploy (combined)
         </button>
+        <button className={btn} disabled={busy} onClick={diagnoseDirectDeclare}>
+          3d · Diagnose Declare (direct Wallet API)
+        </button>
       </div>
 
       {busy && <p className="mt-3">Waiting for Ready X… approve the prompt (may take 10–30s). Current step: {step}</p>}
       {error && <p className="mt-3 text-red-600">Error: {error}</p>}
+      {diagnoseLog && (
+        <pre className="mt-3 overflow-auto border bg-black/5 p-3 text-xs">Diagnose log:\n{diagnoseLog}</pre>
+      )}
 
       <div className="mt-4 grid gap-2 rounded border p-3">
         <div>
