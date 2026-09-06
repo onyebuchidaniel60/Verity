@@ -872,4 +872,37 @@ Pool will `call_contract_syscall(address: VerityAnonymizer, selector: 0x4029...2
 - `contracts/bounty_manager/tests/e2e_test.cairo`
 - `apps/web/app/page.tsx`, `apps/web/lib/contracts.ts`, `apps/web/app/bounties/*`, `app/create/*`, `app/bounty/[id]/*`
 - `strk20.json`, `README.md`, `docs/AI_HANDOFF.md` (this §25)
+## 26. FIX — Fund Privately INVALID_REQUEST_PAYLOAD (actions[1].calldata[1]/[2]) — hex felt (2026-09-06)
+**Context:** User reported `Fund Privately` still failed after `679a22a` (`transfer OPEN + invoke ${openNoteIds[0]}` atomically correct per spec) with Ready X `INVALID_REQUEST_PAYLOAD` at `actions[1].calldata[1]` (= bounty_id) and `[2]` (= amount). That commit had kept decimal strings (`bountyId.toString()`, `BigInt(reward).toString()` dec) — wallet JSON-schema validates `FELT` as `^0x(0|[1-9a-f][0-9a-f]{0,62})$` and `STRK20_CALLDATA_PLACEHOLDER` as `^\$\{(?:openNoteIds\[[0-9]+\]|poolAddress)\}$` (see `apps/web/node_modules/@starknet-io/types-js/dist/types/wallet-api/components.d.ts:171-175`). Decimal fails the FELT regex, hence the two indexed errors; operation `0x4655...`/`nonce 0x...`/`placeholder` were already correct (indices 0,3,4 valid).
+
+**Diagnosis (verified against deployed contract + installed types, no guess):**
+- `contracts/verity_anonymizer/src/verity_anonymizer.cairo:123-134` — `privacy_invoke(operation: felt252, bounty_id: u64, amount: u128, nonce: felt252, note_id: felt252) -> Span<OpenNoteDeposit>` — 5 calldata elements, all felts except placeholder. `apps/web/lib/contracts.ts:16-19` — `VerityAnonymizer 0x04b93a8628d6f905854f54bf3f5a1098cc41273b7dc54d56815e4dda62c0ae4b` (class `0x495c6e8f…b090`) and `BountyManager 0x07e239e…` on Sepolia, verified live; procedure: pool `0x0254a6b…0d91` → `privacy_invoke` selector `0x4029…25043`.
+- `apps/web/node_modules/@starknet-io/types-js/.../components.d.ts` — `STRK20_INVOKE_ACTION { contract, calldata: (FELT | placeholder)[] }` — confirms placeholder must be literal `"${openNoteIds[0]}"` (kept), and every numeric felt must be `0x` hex.
+- `apps/web/app/bounty/[id]/page.tsx` at `679a22a` — `calldata: [operation, bountyId.toString(), amount, nonce, "${openNoteIds[0]}"]` — indices 1,2 decimal → wallet `INVALID_REQUEST_PAYLOAD`. The uncommitted diff after `679a22a` already started hex conversion for `fundPrivate` but left `claim` (`claim` still used `bountyId.toString()`/`amount` dec and had a silent `transfer+invoke → single invoke` fallback that would never produce a real `RELEASE` `OpenNoteDeposit` (anonymizer asserts `NOTE_ZERO` for RELEASE)).
+- `humanToWei` in `apps/web/app/create/page.tsx:19-25` (`whole+frac18` → decimal wei) + `BountyManager.create_bounty(reward_amount: u128)` — reward stored as wei `u128` string (e.g. 1550 STRK → `1550000000000000000000` → `0x54069233bf7f780000`). `formatReward`/`getStoredMeta` unaffected.
+- `BountyManager.fund_bounty` asserts `amount == reward_amount` (`AMOUNT_MISMATCH` if dec vs hex mismatch after wallet fix — must send exact wei hex).
+
+**Fix applied (minimal, targeted — no architecture change, no dependency bump):**
+- `apps/web/app/bounty/[id]/page.tsx:142-156` `fundPrivate` — `amountFelt = "0x" + BigInt(String(reward)).toString(16)`, `bountyIdFelt = "0x" + BigInt(String(bountyId)).toString(16)` (String-wrap handles string|number|bigint returns from `Contract.call`). Action is now `[{type:'transfer',token,amount:'OPEN',recipient:address}, {type:'invoke',contract:VerityAnonymizer,calldata:[operation,bountyIdFelt,amountFelt,nonce,"${openNoteIds[0]}"]}]` — exactly the atomic `transfer OPEN + invoke` per `STRK20_ACTION` spec, with every felt hex-validated (checked `0x0`, `0x1`, `0x540...` all match `^0x(0|[1-9a-f]...)`). Added per-element `console.info(`[fundPrivate] action[1].calldata[j]`, {value, type, stringValue})` so the two failing indexes are now explicitly logged before the wallet call; kept pool/capability/bounty-status logs.
+- `apps/web/app/bounty/[id]/page.tsx:222-243` `claim` — same hex conversion (`bountyIdFelt`, `amountFelt`), same atomic `transfer OPEN + invoke RELEASE` action array, removed silent fallback (previously caught `transfer+invoke` error and retried single `invoke` with random `noteId` — that path bypasses the real `OPEN` note and violates `RELEASE`'s `NOTE_ZERO`/`BM_NOT_SET`/`CLAIMABLE` checks; now it throws with full `code/message/data` so `guard` surfaces `INVALID_REQUEST_PAYLOAD`/`NOT_POOL` etc. honestly). Added `console.info("[claim] STRK20 action array")` symmetry.
+- `apps/web/next-env.d.ts` — reverted `.next/dev/types` → `.next/types` (generated artifact, not intended diff).
+- No change to `Scarb.toml`, contracts, `strk20.json`, `phase1-proof` harness, or `phase2-deploy`.
+
+**Verification (evidence = build, not wallet-signed yet):**
+- `corepack pnpm --filter @verity/web exec tsc --noEmit` — **EXIT 0**
+- `corepack pnpm --filter @verity/web run build` — **Compiled 4.2s, TypeScript 5.8s, Generating static pages 7/7** (`/`, `/_not-found`, `/bounties`, `/bounty/[id]`, `/create`, `/phase1-proof`, `/phase2-deploy`)
+- `wsl scarb build` — **Finished dev 5s** (warnings only `deprecated-starknet-consts`/`Unused import`)
+- `wsl snforge test` — **12 passed, 0 failed** (bounty_manager 3 + verity_anonymizer 9)
+- `git diff --stat` now only `apps/web/app/bounty/[id]/page.tsx` (31+/16-) — no contract, no lockfile, no `next-env` drift.
+
+**Remaining / next step (exact):**
+1. Reload at `http://localhost:3000/bounty/<id>` (Created bounty, e.g. freshly created 1.5 STRK), open browser console, click **Fund privately**, approve Ready X. Console must show `[fundPrivate] action[1].calldata[1] {value:"0x1",...}` and `[1].calldata[2] {value:"0x..."} ` hex, and wallet must no longer return `INVALID_REQUEST_PAYLOAD` at those indexes. Expected next is `NOT_REGISTERED`/`INSUFFICIENT_PRIVATE_BALANCE`/`PRIVACY_LEAK` only if wallet not funded/registered — those are honest wallet errors, not payload validation.
+2. If `INVALID_REQUEST_PAYLOAD` persists, capture the exact `console.error("[fundPrivate] wallet_strk20InvokeTransaction error", e)` with `e.code/message/data` and the just-logged `action[1].calldata[*]` values (type+stringValue).
+3. Same for **Claim reward privately** after a bounty reaches `Claimable` (needs winner `7/13` votes — use owner bypass for e2e, already in `bounty_manager.cairo:245`). Capture claim's `[claim] STRK20 action array` and error if any.
+4. On success, record real `transaction_hash` (Sepolia Voyager `https://sepolia.voyager.online/tx/<hash>`) for `fund_bounty` and for `RELEASE`, update `strk20.json` only with real hashes, and set phase 3/5 evidence.
+
+**Files in this fix (uncommitted → will be committed next):**
+- `apps/web/app/bounty/[id]/page.tsx` — hex felt for `bounty_id`/`amount` in both `fundPrivate` and `claim`, remove claim fallback, preserve atomic `transfer OPEN + invoke ${openNoteIds[0]}` and `u128` handling (`humanToWei` BigInt string preserved)
+- `docs/AI_HANDOFF.md` — this §26
+
 

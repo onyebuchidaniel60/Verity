@@ -144,20 +144,30 @@ export default function BountyDetailPage() {
       const cap = await (await import("@/strk20-proof/strk20-proof")).detectStrk20Capability(wallet);
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
-      const amount = BigInt(reward).toString();
+      // Amount must be hex felt for wallet validation (regex ^0x(0|[1-9a-f][0-9a-f]{0,62})$), not decimal string
+      const amountFelt = "0x" + BigInt(String(reward)).toString(16);
+      const bountyIdFelt = "0x" + BigInt(String(bountyId)).toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
       const operation = "0x46554e445f424f554e5459"; // 'FUND_BOUNTY' as felt
       // Log complete request for diagnosis as required
       const actionArray = [
         { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
-        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "${openNoteIds[0]}"] } as any,
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}"] } as any,
       ];
       console.info("[fundPrivate] STRK20 action array", JSON.stringify(actionArray, null, 2));
-      console.info("[fundPrivate] pool", POOL, "token", STRK20[NETWORK].strkTokenAddress, "bountyId", bountyId, "reward FRI", amount, "nonce", nonce, "note placeholder ${openNoteIds[0]}");
+      // Log every calldata element with type and exact value for the two failing indexes
+      actionArray.forEach((act: any, idx: number) => {
+        console.info(`[fundPrivate] action[${idx}]`, act);
+        if (act.calldata) {
+          act.calldata.forEach((c: any, j: number) => {
+            console.info(`[fundPrivate] action[${idx}].calldata[${j}]`, { value: c, type: typeof c, stringValue: String(c) });
+          });
+        }
+      });
+      console.info("[fundPrivate] pool", POOL, "token", STRK20[NETWORK].strkTokenAddress, "bountyId", bountyId, "bountyIdFelt", bountyIdFelt, "reward FRI", amountFelt, "nonce", nonce, "note placeholder ${openNoteIds[0]}");
       console.info("[fundPrivate] wallet API versions", cap.walletApiVersions, "supported", cap.supported);
       console.info("[fundPrivate] VerityAnonymizer", CONTRACTS.verityAnonymizer, "BountyManager", CONTRACTS.bountyManager);
       try {
-        // Check bounty status before funding
         const provider = createProvider(NETWORK);
         const checkAbi = [{ name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "bounty", type: "Bounty" }], stateMutability: "view" }] as const;
         const checkContract = new Contract({ abi: checkAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
@@ -174,7 +184,6 @@ export default function BountyDetailPage() {
       } catch (e: any) {
         console.error("[fundPrivate] wallet_strk20InvokeTransaction error", e);
         console.error("[fundPrivate] error code", e?.code, "message", e?.message, "data", e?.data, "cause", e?.cause);
-        // Log full error for diagnosis
         try {
           console.error("[fundPrivate] full error", JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
         } catch {}
@@ -215,21 +224,27 @@ export default function BountyDetailPage() {
       const { wallet, address } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
-      const amount = BigInt(bounty?.reward_amount ?? bounty?.rewardAmount ?? 1000).toString();
+      const bountyIdFelt = "0x" + BigInt(bountyId).toString(16);
+      const amountFelt = "0x" + BigInt(String(bounty?.reward_amount ?? bounty?.rewardAmount ?? 1000)).toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
       const operation = "0x52454c45415345"; // 'RELEASE' as felt
-      // Correct payout: create OPEN note for winner, then invoke RELEASE with its id
+      // Correct payout: atomic transfer OPEN + invoke RELEASE with OpenNoteDeposit
+      const actionArray = [
+        { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}"] } as any,
+      ];
+      console.info("[claim] STRK20 action array", JSON.stringify(actionArray, null, 2));
       try {
-        const res: any = await account.strk20InvokeTransaction([
-          { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
-          { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "${openNoteIds[0]}"] } as any,
-        ]);
+        const res: any = await account.strk20InvokeTransaction(actionArray);
+        console.info("[claim] wallet response", res);
         return res.transaction_hash ?? res.hash;
-      } catch (e) {
-        console.warn("[claim] transfer+invoke failed, trying single invoke", e);
-        const noteId = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-        const res: any = await account.strk20InvokeTransaction([{ type: "invoke" as const, contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, noteId] } as any]);
-        return res.transaction_hash ?? res.hash;
+      } catch (e: any) {
+        console.error("[claim] wallet_strk20InvokeTransaction error", e);
+        console.error("[claim] error code", e?.code, "message", e?.message, "data", e?.data);
+        try {
+          console.error("[claim] full error", JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+        } catch {}
+        throw e;
       }
     });
 
