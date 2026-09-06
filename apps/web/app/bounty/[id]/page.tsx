@@ -9,6 +9,7 @@ import { createProvider, VERITY_NETWORKS } from "@/lib/starknet";
 import { CONTRACTS } from "@/lib/contracts";
 import { STRK20 } from "@/lib/strk20";
 import { useWalletStore } from "@/store/wallet";
+import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName } from "@/lib/bounty";
 
 const NETWORK = "sepolia" as const;
 const POOL = STRK20[NETWORK].poolAddress as Address;
@@ -61,45 +62,8 @@ function normalizeAddr(a: string): string | null {
   }
 }
 
-function formatReward(v: any): string {
-  try {
-    const n = BigInt(v ?? 0);
-    if (n === 0n) return "0 STRK";
-    const weiPerStrk = 1000000000000000000n;
-    const whole = n / weiPerStrk;
-    const frac = n % weiPerStrk;
-    if (frac === 0n) return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} STRK`;
-    let fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
-    if (fracStr.length > 6) fracStr = fracStr.slice(0, 6).replace(/0+$/, "");
-    if (whole === 0n) return `0.${fracStr} STRK`;
-    return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fracStr} STRK`;
-  } catch {
-    return String(v ?? "—");
-  }
-}
-
-function weiToStr(wei: string | bigint): string {
-  try {
-    const n = BigInt(wei);
-    const weiPerStrk = 1000000000000000000n;
-    const whole = n / weiPerStrk;
-    const frac = n % weiPerStrk;
-    if (frac === 0n) return whole.toString();
-    const fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
-    return `${whole.toString()}.${fracStr}`;
-  } catch {
-    return String(wei);
-  }
-}
-
-function humanToWei(s: string): string {
-  const trimmed = s.trim().replace(/,/g, "");
-  if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error("Please enter a valid amount");
-  const [whole, frac = ""] = trimmed.split(".");
-  if (frac.length > 18) throw new Error("Too many decimal places (max 18)");
-  const frac18 = (frac + "0".repeat(18)).slice(0, 18);
-  return BigInt((whole === "" ? "0" : whole) + frac18).toString();
-}
+// Use shared helpers from lib/bounty for exact BigInt handling (imported)
+const formatReward = formatRewardWei;
 
 export default function BountyDetailPage() {
   const params = useParams<{ id: string }>();
@@ -154,35 +118,29 @@ export default function BountyDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      // Fetch full ABI for V2 so Bounty/Submission/Report structs decode correctly; fallback to minimal if fetch fails
+      const vm = await loadBounty(provider, id);
+      setBounty(vm as any);
+      const rewardWei = (vm as any).rewardWei ?? 0;
+      if (rewardWei !== undefined && rewardWei !== 0n) {
+        const rewardStr = weiToStr(rewardWei);
+        if (!fundAmount) setFundAmount(rewardStr);
+        else if (fundAmount === "0" || fundAmount === "") setFundAmount(rewardStr);
+      }
+      // Fetch submissions via full ABI (shared model does not yet include submissions, so fetch here)
       let fullAbi: any = null;
       try {
         const cls: any = await provider.getClassAt(CONTRACTS.bountyManager!);
         fullAbi = cls.abi;
       } catch {}
-      const c = new Contract({ abi: (fullAbi || bountyAbi) as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
-      const r: any = await c.call("get_bounty", [id]);
-      // Handle both object (named) and array (raw) returns: V2 returns Bounty struct directly, V1 also. Minimal ABI fallback returns array.
-      const bRaw = r?.bounty ?? r;
-      const b = Array.isArray(bRaw)
-        ? { id: bRaw[0], creator: bRaw[1], reward_amount: bRaw[2], status: bRaw[3], metadata_hash: bRaw[4], created_at: bRaw[5], funded_amount: bRaw[6], winner: bRaw[7], winning_submission: bRaw[8] }
-        : bRaw;
-      setBounty(b);
-      const rewardWei = (b as any)?.reward_amount ?? (b as any)?.[2] ?? 0;
-      // Always use on-chain reward as authoritative; only fallback to 0 if genuinely 0, never hide bug
-      if (rewardWei !== undefined && BigInt(String(rewardWei)) !== 0n) {
-        const rewardStr = weiToStr(rewardWei);
-        if (!fundAmount) setFundAmount(rewardStr);
-        else if (fundAmount === "0" || fundAmount === "") setFundAmount(rewardStr);
-      }
+      const cSub: any = new Contract({ abi: (fullAbi || bountyAbi) as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
       // Load submissions
       try {
-        const cnt: any = await c.call("get_submission_count", [id]);
+        const cnt: any = await cSub.call("get_submission_count", [id]);
         const count = Number(cnt?.count ?? cnt ?? 0);
         const list: any[] = [];
         for (let i = 1; i <= count; i++) {
           try {
-            const s: any = await c.call("get_submission", [id, i]);
+            const s: any = await cSub.call("get_submission", [id, i]);
             const subRaw = s?.submission ?? s;
             const sub = Array.isArray(subRaw)
               ? { id: subRaw[0], bounty_id: subRaw[1], investigator: subRaw[2], evidence_hash: subRaw[3], timestamp: subRaw[4], status: subRaw[5] }

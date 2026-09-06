@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Contract } from "starknet";
 import { createProvider } from "@/lib/starknet";
-import { CONTRACTS } from "@/lib/contracts";
+import { loadBounties, formatRewardWei } from "@/lib/bounty";
 
 const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
   "0": { label: "Created", cls: "badge-created" },
@@ -26,45 +25,9 @@ const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
   "7": { label: "Refunded", cls: "badge-refunded" },
 };
 
-function formatReward(v: any): string {
-  try {
-    const n = BigInt(v ?? 0);
-    if (n === 0n) return "0 STRK";
-    const weiPerStrk = 1000000000000000000n;
-    const whole = n / weiPerStrk;
-    const frac = n % weiPerStrk;
-    if (frac === 0n) return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} STRK`;
-    let fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
-    if (fracStr.length > 6) fracStr = fracStr.slice(0, 6).replace(/0+$/, "");
-    if (whole === 0n) return `0.${fracStr} STRK`;
-    return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fracStr} STRK`;
-  } catch {
-    return String(v ?? "—");
-  }
-}
-
 function shortAddr(a: string) {
   if (!a) return "";
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
-}
-
-function getStoredMeta(id: number) {
-  try {
-    const raw = localStorage.getItem(`verity_bounty_${id}`);
-    if (raw) return JSON.parse(raw);
-  } catch {}
-  return null;
-}
-
-function feltToTitle(felt: any): string | null {
-  try {
-    const hex = BigInt(felt).toString(16);
-    const padded = hex.padStart(62, "0");
-    const buf = Buffer.from(padded, "hex");
-    const str = buf.toString("utf-8").replace(/\0/g, "").trim();
-    if (str && /^[\x20-\x7E ]+$/.test(str)) return str;
-  } catch {}
-  return null;
 }
 
 export default function BountiesPage() {
@@ -74,42 +37,10 @@ export default function BountiesPage() {
 
   useEffect(() => {
     async function load() {
-      if (!CONTRACTS.bountyManager) {
-        setError("Bounty system is initializing.");
-        setLoading(false);
-        return;
-      }
       try {
         const provider = createProvider("sepolia");
-        // Fetch full ABI from chain so Bounty struct (bounty_manager::types::Bounty) decodes correctly.
-        // Minimal ABI with type:"Bounty" fails for V2 (returns only id) because struct is namespaced.
-        let abi: any = null;
-        try {
-          const cls: any = await provider.getClassAt(CONTRACTS.bountyManager!);
-          abi = cls.abi;
-        } catch {}
-        // Fallback minimal ABI that correctly handles V2's namespaced Bounty
-        const fallbackAbi = [
-          { name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" },
-          { name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ type: "bounty_manager::types::Bounty" }], stateMutability: "view" },
-        ] as const;
-        const c = new Contract({ abi: (abi || fallbackAbi) as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
-        const countRes: any = await c.call("get_bounty_count", []);
-        const count = Number(countRes?.count ?? countRes ?? 0);
-        const list: any[] = [];
-        for (let i = 1; i <= count; i++) {
-          try {
-            const r: any = await c.call("get_bounty", [i]);
-            // V2 returns Bounty struct directly; V1 also. Handle both shapes.
-            const b = r?.bounty ?? (Array.isArray(r) ? { id: r[0], creator: r[1], reward_amount: r[2], status: r[3], metadata_hash: r[4], created_at: r[5], funded_amount: r[6], winner: r[7], winning_submission: r[8] } : r);
-            const meta = getStoredMeta(i);
-            const fallbackTitle = feltToTitle((b as any)?.metadata_hash ?? (b as any)?.[4]);
-            const title = meta?.title || fallbackTitle || `Bounty #${i}`;
-            const description = meta?.description || "";
-            list.push({ id: i, ...b, _title: title, _description: description, _meta: meta });
-          } catch {}
-        }
-        setBounties(list.reverse());
+        const list = await loadBounties(provider);
+        setBounties(list as any);
       } catch (e) {
         setError("We couldn't load bounties right now. Please try again.");
       } finally {
@@ -180,16 +111,15 @@ export default function BountiesPage() {
         </div>
       ) : (
         <div style={{ display: "grid", gap: 14 }}>
-          {bounties.map((b) => {
-            const statusKey = String(b.status ?? b.bounty_status ?? "CREATED");
-            const meta = STATUS_LABEL[statusKey] ?? { label: statusKey, cls: "badge-created" };
-            const id = b.id ?? b.bounty_id ?? b[0];
-            const title = b._title as string;
-            const desc: string = b._description as string;
+          {bounties.map((b: any) => {
+            const meta = STATUS_LABEL[b.status] ?? { label: b.status, cls: "badge-created" };
+            const id = b.id;
+            const title = b.title as string;
+            const desc: string = b.description as string;
             const excerpt = desc ? (desc.length > 110 ? desc.slice(0, 110) + "…" : desc) : "Investigation bounty — evidence helps verify the claim.";
-            const reward = formatReward(b.reward_amount ?? b.rewardAmount ?? b[2]);
-            const creator = String(b.creator ?? b[1] ?? "");
-            const createdAt = b.created_at ? new Date(Number(b.created_at) * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+            const reward = b.rewardStr as string;
+            const creator = String(b.creator ?? "");
+            const createdAt = b.createdAt ? new Date(Number(b.createdAt) * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
             return (
               <Link key={id} href={`/bounty/${id}`} className="card card-pad card-hover" style={{ display: "block" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
