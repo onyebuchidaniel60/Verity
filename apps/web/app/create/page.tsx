@@ -17,11 +17,12 @@ export default function CreateBountyPage() {
   const [success, setSuccess] = useState<{ hash: string; id: number | null } | null>(null);
 
   function humanToWei(s: string): string {
-    const trimmed = s.trim();
+    const trimmed = s.trim().replace(/,/g, "");
     if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error("Please enter a valid reward amount");
     const [whole, frac = ""] = trimmed.split(".");
+    if (frac.length > 18) throw new Error("Too many decimal places (max 18)");
     const frac18 = (frac + "0".repeat(18)).slice(0, 18);
-    return BigInt(whole + frac18).toString();
+    return BigInt((whole === "" ? "0" : whole) + frac18).toString();
   }
 
   async function handleCreate() {
@@ -82,7 +83,7 @@ export default function CreateBountyPage() {
   if (success) {
     return (
       <main style={{ maxWidth: 480, margin: "0 auto", textAlign: "center", padding: "32px 0" }}>
-        <div style={{ width: 56, height: 56, borderRadius: 16, background: "var(--green-subtle)", border: "1px solid rgba(16,185,129,0.2)", display: "grid", placeItems: "center", margin: "0 auto 16px", fontSize: 24, color: "var(--green)" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 16, background: "var(--surface)", border: "1px solid var(--border)", display: "grid", placeItems: "center", margin: "0 auto 16px", fontSize: 24, color: "var(--text)" }}>
           ✓
         </div>
         <h1 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>Your bounty is live</h1>

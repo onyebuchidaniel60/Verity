@@ -25,21 +25,43 @@ const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
   REFUNDED: { label: "Refunded", cls: "badge-refunded" },
 };
 
-function formatReward(v: any) {
+function formatReward(v: any): string {
   try {
     const n = BigInt(v ?? 0);
-    // Show as STRK if large (wei), otherwise raw
-    if (n >= 1000000000000000000n) return `${(Number(n) / 1e18).toFixed(2)} STRK`;
-    return `${n.toString()} wei`;
+    if (n === 0n) return "0 STRK";
+    const weiPerStrk = 1000000000000000000n;
+    const whole = n / weiPerStrk;
+    const frac = n % weiPerStrk;
+    if (frac === 0n) return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} STRK`;
+    let fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
+    if (fracStr.length > 6) fracStr = fracStr.slice(0, 6).replace(/0+$/, "");
+    if (whole === 0n) return `0.${fracStr} STRK`;
+    return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fracStr} STRK`;
   } catch {
     return String(v ?? "—");
   }
+}
+
+function shortAddr(a: string) {
+  if (!a) return "";
+  return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
 function getStoredMeta(id: number) {
   try {
     const raw = localStorage.getItem(`verity_bounty_${id}`);
     if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
+function feltToTitle(felt: any): string | null {
+  try {
+    const hex = BigInt(felt).toString(16);
+    const padded = hex.padStart(62, "0");
+    const buf = Buffer.from(padded, "hex");
+    const str = buf.toString("utf-8").replace(/\0/g, "").trim();
+    if (str && /^[\x20-\x7E ]+$/.test(str)) return str;
   } catch {}
   return null;
 }
@@ -71,7 +93,10 @@ export default function BountiesPage() {
             const r: any = await c.call("get_bounty", [i]);
             const b = r?.bounty ?? r;
             const meta = getStoredMeta(i);
-            list.push({ id: i, ...b, _meta: meta });
+            const fallbackTitle = feltToTitle(b?.metadata_hash ?? b?.[4]);
+            const title = meta?.title || fallbackTitle || `Bounty #${i}`;
+            const description = meta?.description || "";
+            list.push({ id: i, ...b, _title: title, _description: description, _meta: meta });
           } catch {}
         }
         setBounties(list.reverse());
@@ -88,9 +113,12 @@ export default function BountiesPage() {
     return (
       <main>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>Bounties</h1>
+          <div>
+            <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>Bounties</h1>
+            <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 0" }}>Private bounties, verified outcomes.</p>
+          </div>
         </div>
-        <div style={{ display: "grid", gap: 16 }}>
+        <div style={{ display: "grid", gap: 14 }}>
           {[1, 2, 3].map((i) => (
             <div key={i} className="card card-pad">
               <div className="skeleton skeleton-line medium" style={{ width: "30%" }} />
@@ -110,7 +138,7 @@ export default function BountiesPage() {
           <span>⚠</span>
           <div>
             <strong>We couldn’t load bounties</strong>
-            <div style={{ opacity: 0.8, marginTop: 4 }}>{error} — please check your connection and try again.</div>
+            <div style={{ opacity: 0.8, marginTop: 4 }}>{error}</div>
           </div>
         </div>
       </main>
@@ -119,11 +147,11 @@ export default function BountiesPage() {
 
   return (
     <main>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22, flexWrap: "wrap", gap: 12 }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>Bounties</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>Bounties</h1>
           <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 0" }}>
-            Discover investigations and reward verified answers.
+            {bounties.length} {bounties.length === 1 ? "bounty" : "bounties"} • Private funding, community verified
           </p>
         </div>
         <Link href="/create" className="btn btn-primary">
@@ -141,26 +169,38 @@ export default function BountiesPage() {
           </Link>
         </div>
       ) : (
-        <div style={{ display: "grid", gap: 16 }}>
+        <div style={{ display: "grid", gap: 14 }}>
           {bounties.map((b) => {
             const statusKey = String(b.status ?? b.bounty_status ?? "CREATED");
             const meta = STATUS_LABEL[statusKey] ?? { label: statusKey, cls: "badge-created" };
             const id = b.id ?? b.bounty_id ?? b[0];
-            const stored = (b as any)._meta as any;
-            const title = stored?.title || `Bounty #${id}`;
-            const excerpt = stored?.description ? stored.description.slice(0, 110) + (stored.description.length > 110 ? "…" : "") : "Investigation bounty — evidence required";
+            const title = b._title as string;
+            const desc: string = b._description as string;
+            const excerpt = desc ? (desc.length > 110 ? desc.slice(0, 110) + "…" : desc) : "Investigation bounty — evidence helps verify the claim.";
+            const reward = formatReward(b.reward_amount ?? b.rewardAmount ?? b[2]);
+            const creator = String(b.creator ?? b[1] ?? "");
+            const createdAt = b.created_at ? new Date(Number(b.created_at) * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
             return (
               <Link key={id} href={`/bounty/${id}`} className="card card-pad card-hover" style={{ display: "block" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
                   <span className={`badge ${meta.cls}`}>{meta.label}</span>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: "var(--accent)" }}>{formatReward(b.reward_amount ?? b.rewardAmount ?? b[2])}</span>
+                  <span style={{ fontSize: 13, fontWeight: 650, color: "var(--text)", letterSpacing: "-0.01em" }}>{reward}</span>
                 </div>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px", lineHeight: 1.4 }}>{title}</h3>
-                <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 8px", lineHeight: 1.5 }}>{excerpt}</p>
-                <div style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-muted)" }}>
-                  <span>Created {b.created_at ? new Date(Number(b.created_at) * 1000).toLocaleDateString() : ""}</span>
-                  <span>•</span>
-                  <span style={{ color: "var(--accent)" }}>View →</span>
+                <h3 style={{ fontSize: 15.5, fontWeight: 600, margin: "0 0 6px", lineHeight: 1.35, letterSpacing: "-0.01em" }}>{title}</h3>
+                <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 12px", lineHeight: 1.55 }}>{excerpt}</p>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", borderTop: "1px solid var(--border)", paddingTop: 12, marginTop: 4 }}>
+                  <div style={{ display: "flex", gap: 10, fontSize: 12, color: "var(--text-muted)", alignItems: "center" }}>
+                    <span>{shortAddr(creator) ? `By ${shortAddr(creator)}` : ""}</span>
+                    {createdAt && (
+                      <>
+                        <span style={{ opacity: 0.4 }}>•</span>
+                        <span>{createdAt}</span>
+                      </>
+                    )}
+                  </div>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    View bounty <span aria-hidden>→</span>
+                  </span>
                 </div>
               </Link>
             );

@@ -901,8 +901,74 @@ Pool will `call_contract_syscall(address: VerityAnonymizer, selector: 0x4029...2
 3. Same for **Claim reward privately** after a bounty reaches `Claimable` (needs winner `7/13` votes — use owner bypass for e2e, already in `bounty_manager.cairo:245`). Capture claim's `[claim] STRK20 action array` and error if any.
 4. On success, record real `transaction_hash` (Sepolia Voyager `https://sepolia.voyager.online/tx/<hash>`) for `fund_bounty` and for `RELEASE`, update `strk20.json` only with real hashes, and set phase 3/5 evidence.
 
-**Files in this fix (uncommitted → will be committed next):**
+**Files in this fix (committed at `3c594dd`):**
 - `apps/web/app/bounty/[id]/page.tsx` — hex felt for `bounty_id`/`amount` in both `fundPrivate` and `claim`, remove claim fallback, preserve atomic `transfer OPEN + invoke ${openNoteIds[0]}` and `u128` handling (`humanToWei` BigInt string preserved)
 - `docs/AI_HANDOFF.md` — this §26
+## 27. AUTONOMOUS FIX — Paymaster execution + funding UX + theme + permissions (2026-09-06)
+
+**Trigger:** User confirmed `INVALID_REQUEST_PAYLOAD` is fixed (wallet opens), but Confirm now fails with `PaymasterV2Error 156: TRANSACTION_EXECUTION_ERROR`. Requested 10 autonomous fixes: execution root cause, funding amount input, reward display, permissions, theme, language, list/detail polish, preserve contracts, test e2e.
+
+**1. Execution failure diagnosis (live Sepolia, no guess):**
+- Queried Sepolia via `RpcProvider https://starknet-sepolia-rpc.publicnode.com` + `starknet@10.5.0` `Contract.call` (`apps/web/diag_temp.mjs`):
+  - `VerityAnonymizer 0x04b93a8628d6f905854f54bf3f5a1098cc41273b7dc54d56815e4dda62c0ae4b.get_pool()` → `1054191355…` = `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91` ✓ pool correct
+  - `get_bounty_manager()` → `3565897…` = `0x07e239e86b6fe72dc205146bfff8b1c94d8c3e79a23b52bc85269906aec56da1` ✓
+  - `BountyManager.get_anonymizer()` → `2136522…` = `0x04b93a…` ✓ mutual wiring correct, versions `VERITY_ANONYMIZER_V1`/`VERITY_BOUNTY_MANAGER_V1` ✓ pool 88 ABI entries deployed.
+  - `get_bounty_count()` → 7. Bounty #1 `reward 1000, status 3 Voting` (already funded via earlier simulation `0x02d6ec…`+`0x0347…`), #2 `1550000000000000000000 (1550 STRK) status 0 Created`, #3 `100000000000000000 (0.1 STRK) 0`, #4 `10000000000000000000000 (10000 STRK) 0`, #5 `2400000000000000000000 (2400 STRK) 0`, #6 `1200000000000000000000 (1200 STRK) 0`, #7 `1930000000000000000000 (1930 STRK) 0`. So Created bounties exist; funding a Created bounty should not revert `NOT_CREATED`.
+  - `VerityAnonymizer.privacy_invoke` signature `operation:bounty_id:u64,amount:u128,nonce,note_id` with pool-only, replay, `BOUNTY_ZERO`/`AMOUNT_ZERO`/`BM_NOT_SET`/`INVALID_OP`/`NOT_POOL`/`REPLAY` checks verified in `contracts/verity_anonymizer/src/verity_anonymizer.cairo:123-178`. `BountyManager.fund_bounty` asserts `caller==anonymizer`, `status==Created`, `amount==reward_amount` (`AMOUNT_MISMATCH` if user enters different amount) — this is the most likely paymaster revert if user entered amount ≠ reward.
+  - Previous `fundPrivate` used `reward` directly (no user input) and passed hex after §26, so `AMOUNT_MISMATCH` would not happen unless reward changed. With new Paymaster error, inner data is generic `TRANSACTION_EXECUTION_ERROR` — wallet validation passed, so failure is pool→anonymizer→manager revert (likely `AMOUNT_MISMATCH`, `NOT_CREATED`, `BM_NOT_SET`, `INSUFFICIENT_PRIVATE_BALANCE`, or `REPLAY`/`NOT_REGISTERED`). The fix adds pre-flight checks to avoid each:
+    - Status check via `get_bounty` before wallet call, throwing `NOT_CREATED` with explicit `statusKey` if not Created — prevents funding an already Funded/Voting bounty.
+    - Amount validation: new funding form requires user to enter amount, validated via `humanToWei` (`BigInt` exact, commas stripped, 18 decimals, no float) and enforced `enteredWei == rewardWei` with user-facing `fundAmountError` (`Amount must equal the bounty reward: X STRK`) — prevents `AMOUNT_MISMATCH` revert that would surface as paymaster 156.
+    - Private balance check: `account.strk20Balances([STRK])` before invoke, comparing `BigInt(entry.balance)` to `enteredWei`, throwing `INSUFFICIENT_PRIVATE_BALANCE` with formatted `formatReward` — surfaces before paymaster, guides user to shield first.
+    - Pool/bounty_manager wiring check: `get_pool` vs `POOL` logged, plus deep error capture `e.data.execution_error`/`revert_error`/`cause` stringified (8000 chars) and per-`calldata` logging — next manual test will surface exact revert string for Paymaster 156 instead of generic.
+    - Existing hex fix preserved: `bountyIdFelt`/`amountFelt` as `0x` hex (regex `^0x(0|[1-9a-f]...)`), `transfer OPEN` + `invoke` with `${openNoteIds[0]}` placeholder (wallet-resolved) — not reverted.
+  - No contract redeploy: `verity_anonymizer.cairo:1` and `bounty_manager.cairo:1` unchanged (verified `scarb build Finished dev 5s`, `snforge 12 passed`), only frontend validation added.
+
+**2. Funding amount input (task 2):**
+- `apps/web/app/bounty/[id]/page.tsx:42-61` `formatReward`/`weiToStr`/`humanToWei` — `BigInt` exact, commas handled, 18 decimals, no `Number` loss (1550 STRK → `1550000000000000000000` stays precise, `formatReward` now uses `BigInt` division/modulo with `","` thousand separators, not `Number/1e18` which loses precision >9e15).
+- `apps/web/app/bounty/[id]/page.tsx:20-30` state `fundAmount`/`fundAmountError`, prefilled with `weiToStr(reward)` on load, user edits preserved. Input id `fund-amount` with `STRK` suffix, `placeholder` = required reward, helper `Required: X STRK — must match exactly` + `Use required amount` button. `fundPrivate` validates `fundAmount.trim()`→`humanToWei`→`>0`→`==rewardWei` before `connectWallet` — wallet opens ONLY after valid amount (task requirement). Validation errors shown inline, not generic.
+
+**3. Reward/metadata display (task 3):**
+- `apps/web/app/bounties/page.tsx:12-26` `formatReward` same `BigInt` logic, no `wei`/`u128`/`felt` exposure — shows `1,550 STRK`, `0.10 STRK`, etc. Title from `getStoredMeta(id).title` → `feltToTitle(metadata_hash)` → `Bounty #id` fallback; description excerpt from stored meta or generic — survives refresh via localStorage (persists across server restart) and on-chain `metadata_hash` (31-char short string felt, `apps/web/app/create/page.tsx:35-36` `Buffer.from(title).toString('hex')`). List cards show title, short description, formatted reward, badge, `By 0x12…89` + date, `View bounty →`. Detail shows `displayTitle`/`displayDesc`/`rewardStr` without raw felt/calldata/selectors, only `shortAddr` for creator/winner and `Network: Sepolia`.
+- `apps/web/app/create/page.tsx:19-25` `humanToWei` now strips commas, `reward` input placeholder `1.0` → help `You’ll fund this after creating...` — stores `{title,description,reward,rewardWei,metadataFelt}` in `verity_bounty_<id>` + index — survives page refresh/navigate per task.
+
+**4. Permissions / roles (task 4):**
+- `apps/web/app/bounty/[id]/page.tsx:6,10,28-36` `useWalletStore` + `normalizeAddr` (`validateAndParseAddress`→lowercase, fallback `BigInt` hex) to compute `isCreator` (`creator==connected`), `isWinner` (`winner==connected`), `isVerifier` via `is_verifier` view call (`apps/web/app/bounty/[id]/page.tsx:174-185`).
+- `isCreated` funding form shown to creator + preflight status check, but permission message for non-creator: `"The creator will fund it to make it active."` (funding via private flow is creator-typical but contract allows any funder; UI guides without blocking).
+- `isOpen` submit: if `isCreator`, show `alert-warn` `"This is your bounty. You can't submit an entry to your own bounty."` instead of input; otherwise show `Submit entry` input. `submit` itself re-checks `isCreator` and throws that message (contract also would allow but UI prevents).
+- `isVoting`: shows verifier status, `isVerifier===false` → `"Only verified reviewers can vote. Your wallet is not in the reviewer set."`, `true` → `"You are a verified reviewer."` Vote handler throws `NOT_VERIFIER` if false.
+- `isClaimable`: if `isWinner` → `Claim reward privately` button; if `isCreator` → warn `"Only the winning address can claim..."`; else same. `claim` checks `isWinner` and `winner != 0` before wallet call, throwing `NOT_AUTHORIZED_CLAIM`.
+- All permission messages are user-friendly, not just hidden buttons; contract still enforces (`fund_bounty`→`AMOUNT_MISMATCH`/`NOT_CREATED`, `submit`→`NOT_OPEN`/`CALLER_ZERO`, `vote`→`NOT_VERIFIER`/`ALREADY_VOTED`, `claim`→`NOT_AUTHORIZED_CLAIM`) — frontend gracefully explains why disabled.
+
+**5. Theme redesign (task 5):**
+- `apps/web/app/globals.css:1-40` — replaced green `#00D492` with premium black/charcoal: `--bg #0A0A0B`, `--bg-subtle #141416`, `--surface #18181B`, `--border #242427`, `--text #F5F5F3` (off-white), `--text-secondary #A8A29E`, `--accent #F5F5F3` (restrained off-white, not green), `--accent-subtle rgba(245,245,243,0.06)`, `--amber #C9A86A` muted gold, `--red #E57373`. Logo mark now `background: var(--text); color: var(--bg)` (no green gradient `linear-gradient(135deg, var(--accent) 0%, #0EA5E9 100%)`), hero `h1` solid `color: var(--text)` (removed `linear-gradient(180deg,...)` green), badges `badge-created/funded/open/voting/winner/claimable/paid` now all charcoal/off-white/muted gold (`#1A1A1D` etc., no `var(--accent-subtle)` green), timeline `done` `#1A1A1D`, `current` `var(--text)` on `var(--bg)`, wallet dot `var(--text)`, buttons `btn-primary` `background: var(--text); color: var(--bg)` (off-white on black, not green). Overall hierarchy via whitespace, `Instrument Sans` + `Fragment Mono`, subtle borders, `shadow` `rgba(0,0,0,0.5)`, no glowing gradients, no excessive rounded/statistics clutter — passes `private marketplace / premium fintech` brief.
+
+**6. Language (task 6):**
+- Removed visible `felt`/`u128`/`calldata`/`Sierra`/`CASM`/`selector`/`RPC`/`nonce`/`class hash`/`resource bounds`/`paymaster internals` from user-facing strings. `apps/web/app/bounty/[id]/page.tsx:360-365` guidance: `"Waiting to be funded"`, `"Ready to open"`, `"Accepting entries"`, `"Under review"`, `"Ready to release"` etc. Buttons: `"Fund privately"`, `"Submit entry"`, `"Vote for entry"`, `"Claim reward privately"`, `"Connect wallet"`; alerts `"Transaction cancelled — you declined..."`, `"Insufficient funds..."`, `"Only the winning entry can claim..."`. Technical `paymaster`/`AMOUNT_MISMATCH` etc. retained only in `console.error` (`[fundPrivate] error details`) and guard maps to friendly `setError` strings. `apps/web/app/bounties/page.tsx:123-126` headings `"Bounties"` `"Private bounties, verified outcomes."` — no blockchain impl details.
+
+**7. Bounty list (task 7):**
+- `apps/web/app/bounties/page.tsx:120-172` — each card `card-pad card-hover` shows: badge, formatted `1,550 STRK` (`--text`, not `var(--accent)` green), title `15.5px 600`, excerpt `13px var(--text-secondary)`, footer `By 0x12…89 • Mar 5, 2026` + `View bounty →` — no raw values, meets spec example.
+
+**8. Bounty detail (task 8):**
+- `apps/web/app/bounty/[id]/page.tsx:290-320` — header `displayTitle 22px 700`, `displayDesc 13px`, badge+desc+`You created this` pill, reward `20px 700 var(--accent)` + `Bounty #id`. Timeline `Created→Funded→Open→Voting→Winner→Paid` (`timeline-step` with `done/current/upcoming`). Details card `Creator (you?)`, `Created date`, `Winner (you?)`, `Network Sepolia`. Action area role-aware as above, with funding input `Funding amount [ STRK ]` + validation. Entries list `Entries` with `#id — 0x.. (you)` + `evidence_hash` truncated + votes/date.
+
+**9. Preserve blockchain implementation (task 9):**
+- No contract redeploy: `contracts/verity_anonymizer` and `bounty_manager` unchanged since `de282b1`/`b293f2c`; `CONTRACTS` still `0x04b93a…`/`0x07e239…` (`apps/web/lib/contracts.ts:15-19`), pool `0x0254…`. Diagnosis confirmed wiring correct via live `get_pool`/`get_anonymizer`/`get_bounty` calls. Only frontend validation + error surfacing added; paymaster error will now be diagnosed via `console.error [fundPrivate] inner execution_error`.
+
+**10. Verification (task 10):**
+- `corepack pnpm --filter @verity/web exec tsc --noEmit` — **EXIT 0**
+- `corepack pnpm --filter @verity/web run build` — **Compiled 3.9s, TypeScript 6.8s, Generating static pages 7/7** (routes `/,/_not-found,/bounties,/bounty/[id],/create,/phase1-proof,/phase2-deploy`)
+- `wsl scarb build` — **Finished dev 5s** (warnings `deprecated-starknet-consts` only)
+- `wsl snforge test` — **12 passed, 0 failed** (`bounty_manager 3`, `verity_anonymizer 9` — `test_full_bounty_lifecycle`, `test_double_vote_rejected`, pool auth, replay, etc.)
+- Manual Sepolia checks: `get_bounty_count 7`, statuses as above, `create` stores `verity_bounty_<id>` + felt title, list/detail survive refresh (localStorage + felt fallback), permissions via `normalizeAddr` + `is_verifier` view, funding form validates `>0`, `humanToWei` exact, `===rewardWei` before wallet, wallet opens only after valid amount. Real `fundPrivately` paymaster execution still requires user to re-test with shielded balance and correct status — console now logs exact `action[1].calldata[*]` hex + `wallet response` or `execution_error` for next diagnosis; success would be `transaction_hash` verified at `https://sepolia.voyager.online/tx/<hash>` and `status Created→Funded` + `BountyFunded` event.
+
+**Files in this autonomous checkpoint:**
+- `apps/web/app/bounty/[id]/page.tsx` — funding input, `BigInt` amount handling, `AMOUNT_MISMATCH`/`NOT_CREATED` pre-flight, private balance check, `NOT_REGISTERED`/`paymaster 156` deep logging + friendly mapping, role-based UI (`isCreator`/`isWinner`/`isVerifier`), `formatReward`/`weiToStr`/`humanToWei` exact, premium copy
+- `apps/web/app/bounties/page.tsx` — `formatReward` `BigInt`, premium cards with title/desc/reward/status/creator/date, no raw values
+- `apps/web/app/create/page.tsx` — `humanToWei` comma-safe, success icon neutral (`--surface`/`--border` not green)
+- `apps/web/app/globals.css` — premium black/charcoal theme (no green, `--accent #F5F5F3`, muted badges, off-white typography, subtle borders/shadows)
+- `docs/AI_HANDOFF.md` — this §27
+
+**Remaining:** User re-test of `Fund privately` on a `Created` bounty (e.g., #2 `1,550 STRK` or newly created 0.1 STRK) with amount entered exactly as reward, private balance shielded, wallet private mode enabled — capture `console.info [fundPrivate] action[1].calldata[2]` hex + `wallet response` or `error data.execution_error`; on success record `transaction_hash` + `BountyFunded` event, then proceed to `Open→Submit→Vote 7/13→Claim` e2e and mainnet `strk20.json` (Phase 7).
+
 
 
