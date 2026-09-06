@@ -668,4 +668,45 @@ Inspected `apps/web/app/phase1-proof/page.tsx:162-175` (`runAll`) and `apps/web/
 **Known issues / blockers:**
 - Gate 1 = **NO** (individual operations now verified by user, full-flow orchestration just fixed — needs manual re-test with waits).
 - Phase 2 = **NOT AUTHORIZED**.
+## 22. Gate 1 manual evidence path — individual operations verified (2026-09-06, user-authorized)
+**Instruction from user (2026-09-06):** Keep `a04e528` as the code checkpoint. Do NOT modify STRK20 operation implementations, wallet discovery, or make another speculative `Run full flow` change. `Run full flow` remains a convenience/UI issue and must not block Gate 1 verification. Gate 1 evidence will be established via the working individual buttons.
+
+**Current code checkpoint:** `a04e528` — `fix(phase1-proof): make Run full flow explicitly sequence with waits` (pushed, `origin/main == a04e528`, working tree clean except `apps/web/next-env.d.ts` line-ending artifact which is not committed). No new STRK20 operation, discovery, or Wallet API version change in this §22 update — docs only, per instruction.
+
+**User-verified state (reported 2026-09-06):**
+- `Connect` — works
+- `Shield` (`wallet_strk20InvokeTransaction` `deposit`) — works
+- `Balances` (`wallet_strk20Balances`) — works
+- `Transfer` (`wallet_strk20InvokeTransaction` `transfer`) — works
+- `Withdraw` (`wallet_strk20InvokeTransaction` `withdraw`) — works
+- `Run full flow` — still unreliable (performs only Shield then stops) — **intentionally deferred** as a UI convenience, not a Gate 1 blocker.
+
+**Agent record (no simulation, no new code in this section):** The harness at `a04e528` indeed contains the sequential `runPhase1Proof` + `waitForTxAccepted`/`waitForShieldedBalance` waits and the explicit `runAll` orchestration, but the user has directed that no further orchestration change be made until the underlying manual flow is proven. Therefore this handoff does not re-edit `apps/web/app/phase1-proof/page.tsx` or `apps/web/strk20-proof/strk20-proof.ts`. The reliable path for Gate 1 is the manual individual-button sequence.
+
+**Gate 1 manual plan (user will execute, agent will record):**
+1. `Connect` → record `walletId`, `walletName`, `walletApiVersions`, `chainId`, `address`
+2. `Shield` → record `wallet API method: wallet_strk20InvokeTransaction`, `actions: [{type:'deposit',token,amount}]`, `transaction_hash`, `network: sepolia`, `success/failure`, exact error if any
+3. Wait for confirmation (user wait; the `waitForTxAccepted`/`waitForShieldedBalance` helpers exist but manual wait is sufficient for individual flow)
+4. `Balances` → record `wallet_strk20Balances`, `tokens`, `result: STRK20_BALANCE_ENTRY[]`, `transaction_hash: n/a (read)`, success/failure
+5. `Transfer` → record `wallet_strk20InvokeTransaction`, `actions: [{type:'transfer',token,amount,recipient}]`, `transaction_hash`, success/failure
+6. Wait for confirmation
+7. `Withdraw` → record `wallet_strk20InvokeTransaction`, `actions: [{type:'withdraw',token,amount,recipient}]`, `transaction_hash`, success/failure
+
+Each hash must be a real on-chain Sepolia hash verifiable at `https://sepolia.voyager.online/tx/<hash>` and touching the pinned pool `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`. No `strk20.json` update until hashes are provided. Gate 1 becomes **YES** only when those real hashes are observed — compilation/build alone does not satisfy Gate 1.
+
+**What remains unreliable (not a Gate 1 blocker):**
+- `Run full flow` button — stops after Shield in the user's latest test. Per user instruction, this is now tracked as `UI convenience` and will not be re-worked until after Gate 1 is established via individual operations. No speculative fix in this commit.
+
+**Verification performed for this docs-only checkpoint:**
+- `git status` at start: `main` at `a04e528`, `origin/main == a04e528`, only `apps/web/next-env.d.ts` line-ending diff (not committed, ignored), otherwise clean — confirmed `a04e528` is the retained checkpoint.
+- `git log --oneline -4` confirmed chain `a04e528 → 6bcc002 → d3042eb → ...`
+- No `pnpm`/`scarb` re-run needed — no code change, so prior `tsc --noEmit EXIT 0` and `next build Compiled successfully` from §21 remain the last verified build.
+- This handoff edit is the only file staged for the next checkpoint.
+
+**Next step (exact, awaiting user evidence):**
+1. User runs the manual individual-button sequence above on Sepolia with the working harness at `a04e528` and posts the per-operation evidence (operation, wallet API method, tx hash, network, success/failure, exact error).
+2. Agent will append the evidence verbatim to §22.x, verify each hash on Sepolia Voyager, update `strk20.json` only with real hashes, set Gate 1 = YES if the required operations succeeded, then create the checkpoint. Until then Gate 1 = **NO**, Phase 2 = **NOT AUTHORIZED**.
+
+**Files changed (this docs-only commit):**
+- `docs/AI_HANDOFF.md` — this §22 (no code change, `a04e528` retained as checkpoint)
 
