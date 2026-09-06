@@ -141,29 +141,44 @@ export default function BountyDetailPage() {
       if (!bounty) throw new Error("Bounty not loaded");
       const reward = bounty.reward_amount ?? bounty.rewardAmount ?? bounty[2] ?? 1000;
       const { wallet, address } = await connectWallet();
+      const cap = await (await import("@/strk20-proof/strk20-proof")).detectStrk20Capability(wallet);
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
       const amount = BigInt(reward).toString();
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      // Correct STRK20 Wallet API funding flow: create an OPEN note via private transfer, then invoke VerityAnonymizer
-      // The VerityAnonymizer's privacy_invoke expects (operation, bounty_id, amount, nonce, note_id) where note_id is the open note id
-      // We use the placeholder ${openNoteIds[0]} which the wallet resolves to the actual note_id of the OPEN transfer in the same tx
       const operation = "0x46554e445f424f554e5459"; // 'FUND_BOUNTY' as felt
-      // For funding, we need to create an open note for the reward amount and then fill it via the anonymizer
-      // The correct wallet request is a single atomic transaction with two actions: transfer OPEN + invoke
+      // Log complete request for diagnosis as required
+      const actionArray = [
+        { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "${openNoteIds[0]}"] } as any,
+      ];
+      console.info("[fundPrivate] STRK20 action array", JSON.stringify(actionArray, null, 2));
+      console.info("[fundPrivate] pool", POOL, "token", STRK20[NETWORK].strkTokenAddress, "bountyId", bountyId, "reward FRI", amount, "nonce", nonce, "note placeholder ${openNoteIds[0]}");
+      console.info("[fundPrivate] wallet API versions", cap.walletApiVersions, "supported", cap.supported);
+      console.info("[fundPrivate] VerityAnonymizer", CONTRACTS.verityAnonymizer, "BountyManager", CONTRACTS.bountyManager);
       try {
-        const res: any = await account.strk20InvokeTransaction([
-          { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
-          { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "${openNoteIds[0]}"] } as any,
-        ]);
-        return res.transaction_hash ?? res.hash;
+        // Check bounty status before funding
+        const provider = createProvider(NETWORK);
+        const checkAbi = [{ name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "bounty", type: "Bounty" }], stateMutability: "view" }] as const;
+        const checkContract = new Contract({ abi: checkAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+        const chk: any = await checkContract.call("get_bounty", [bountyId]);
+        console.info("[fundPrivate] bounty status before", chk?.bounty ?? chk);
       } catch (e) {
-        // Fallback for wallets that don't support OPEN in same tx: try single invoke with note_id 0 (empty span, bounty still funded on-chain via credit)
-        console.warn("[fundPrivate] transfer+invoke failed, trying single invoke fallback", e);
-        const res: any = await account.strk20InvokeTransaction([
-          { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "0x0"] } as any,
-        ]);
+        console.warn("[fundPrivate] could not check bounty status", e);
+      }
+      try {
+        console.info("[fundPrivate] calling wallet_strk20InvokeTransaction with", JSON.stringify(actionArray, null, 2));
+        const res: any = await account.strk20InvokeTransaction(actionArray);
+        console.info("[fundPrivate] wallet response", res);
         return res.transaction_hash ?? res.hash;
+      } catch (e: any) {
+        console.error("[fundPrivate] wallet_strk20InvokeTransaction error", e);
+        console.error("[fundPrivate] error code", e?.code, "message", e?.message, "data", e?.data, "cause", e?.cause);
+        // Log full error for diagnosis
+        try {
+          console.error("[fundPrivate] full error", JSON.stringify(e, Object.getOwnPropertyNames(e), 2));
+        } catch {}
+        throw e;
       }
     });
 
