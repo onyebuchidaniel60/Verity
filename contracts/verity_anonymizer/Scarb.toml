@@ -13,7 +13,6 @@ privacy.workspace = true
 [dev-dependencies]
 snforge_std.workspace = true
 assert_macros.workspace = true
-bounty_manager = { path = "../bounty_manager" }
 
 [[target.starknet-contract]]
 sierra = true

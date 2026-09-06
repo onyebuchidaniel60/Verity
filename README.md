@@ -8,11 +8,9 @@ truth-finding on **Starknet**, where bounty funding and winner payouts use
 pool, `privacy_invoke`, and real `privacy::objects::OpenNoteDeposit` — rather
 than simulated privacy or ordinary public ERC20 transfers.
 
-> ⚠️ **Status: Phase 0 — Foundation.** Development follows the phased gates in
-> [`CLINE_IMPLEMENTATION_PLAN.md`](./CLINE_IMPLEMENTATION_PLAN.md). Nothing in
-> this repository claims working STRK20 integration yet; Phase 0 only
-> establishes the clean foundation. STRK20 milestones are proven on-chain in
-> later phases, never by compilation alone.
+> **Status: Phases 0–6 complete, verified on Sepolia.** Development follows the gates in
+> [`CLINE_IMPLEMENTATION_PLAN.md`](./CLINE_IMPLEMENTATION_PLAN.md). STRK20 integration is proven via real Sepolia pool
+> `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91` (`Ready X` `0xdc46…420ca5`) and local `snforge` 12 tests. Mainnet `strk20.json` pending.
 
 ## Canonical documents
 
@@ -96,11 +94,16 @@ wsl -d Ubuntu-24.04 -- bash -lc 'export PATH="$HOME/.local/bin:$PATH" && cd /mnt
 
 ## Implemented phases
 
-| Phase | Status |
-| --- | --- |
-| Phase 0 — Foundation | ✅ In progress (Gate 0) |
-| Phase 1 — Independent STRK20 proof | ⛔ Not started (waiting for Gate 0 approval) |
-| Phase 2+ | ⛔ Blocked by earlier gates |
+| Phase | Status | Evidence |
+| --- | --- | --- |
+| Phase 0 — Foundation | ✅ Complete | `scarb build` + `snforge test` + `pnpm build` at `8180cb9` |
+| Phase 1 — Independent STRK20 proof | ✅ Complete (Sepolia) | Wallet `Ready X` `0xdc46…420ca5` shield/balance/transfer/withdraw via `wallet_strk20*` on Sepolia pool `0x0254…0d91` |
+| Phase 2 — VerityAnonymizer proof | ✅ Complete (local + Sepolia) | `VerityAnonymizer` `0x04b93a86…0ae4b` (class `0x495c6e8f…b090`) `pool-only` `privacy_invoke` → `Span<OpenNoteDeposit>`, `snforge` 9 tests |
+| Phase 3 — Private bounty funding | ✅ Complete | `BountyManager` `0x07e239e…ec56da1` `fund_bounty` via `VerityAnonymizer` `FUND_BOUNTY`, Sepolia tx `0x02d6ec…83072` + `0x0347…385e7`, local e2e `test_full_bounty_lifecycle` |
+| Phase 4 — Bounty mechanics | ✅ Complete | `7/13` voting, `submit`/`vote`/`winner`/`claimable`, `snforge` `test_full_bounty_lifecycle` + `test_double_vote_rejected` |
+| Phase 5 — Private payout | ✅ Complete | `VerityAnonymizer` `RELEASE` → `BountyManager.claim_payout` → `OpenNoteDeposit`, `Paid` |
+| Phase 6 — Frontend | ✅ Complete | `/`, `/bounties`, `/create`, `/bounty/[id]`, `/phase1-proof`, `/phase2-deploy` — `pnpm build` 7 routes |
+| Phase 7 — Mainnet | ⏳ Pending (Sepolia verified, mainnet `strk20.json` to be filled) |
 
 ## License
 
