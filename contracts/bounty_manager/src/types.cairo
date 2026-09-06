@@ -1,23 +1,37 @@
-//! Bounty domain types — Phase 4+ (VERITY_SPEC §7, §8, §11).
-//! Full lifecycle after Phase 3 funding.
+//! Verity Bounty domain types — Investigator staking & anonymous reputation architecture.
+//! Replaces verifier committee (13/7) with creator-controlled winner selection,
+//! fixed investigator stake, report/slash, and reputation threshold.
 
 use starknet::ContractAddress;
 
-/// Canonical bounty lifecycle status.
+/// Canonical bounty lifecycle — creator-controlled.
+//! CREATED -> FUNDED -> OPEN -> WINNER_SELECTED -> CLAIMABLE -> PAID
+//! Alternative: CREATED/FUNDED/OPEN -> REFUNDED (no winner, protocol fee)
 #[derive(Copy, Drop, Serde, PartialEq, Debug, starknet::Store)]
 pub enum BountyStatus {
     #[default]
     Created,
     Funded,
     Open,
-    Voting,
     WinnerSelected,
     Claimable,
     Paid,
     Refunded,
 }
 
-/// On-chain bounty record — minimal required fields per SPEC §8 plus lifecycle.
+/// Submission lifecycle for investigator investigations.
+//! PENDING -> ACCEPTED (if winner/good) or REJECTED or REPORTED -> SLASHED
+#[derive(Copy, Drop, Serde, PartialEq, Debug, starknet::Store)]
+pub enum SubmissionStatus {
+    #[default]
+    Pending,
+    Accepted,
+    Rejected,
+    Reported,
+    Slashed,
+}
+
+/// On-chain bounty record — minimal required fields per spec §8 plus new lifecycle.
 #[derive(Copy, Drop, Serde, starknet::Store, PartialEq, Debug)]
 pub struct Bounty {
     pub id: u64,
@@ -31,7 +45,7 @@ pub struct Bounty {
     pub winning_submission: u64,
 }
 
-/// Submission record for evidence (SPEC §13).
+/// Investigation submission — investigator pseudonymous, requires stake + reputation.
 #[derive(Copy, Drop, Serde, starknet::Store, PartialEq, Debug)]
 pub struct Submission {
     pub id: u64,
@@ -39,4 +53,29 @@ pub struct Submission {
     pub investigator: ContractAddress,
     pub evidence_hash: felt252,
     pub timestamp: u64,
+    pub status: SubmissionStatus,
+}
+
+/// Report for malicious/fraudulent investigation — creator-originated, safeguards against abuse.
+#[derive(Copy, Drop, Serde, starknet::Store, PartialEq, Debug)]
+pub struct Report {
+    pub bounty_id: u64,
+    pub submission_id: u64,
+    pub reporter: ContractAddress,
+    pub reason: felt252,
+    pub evidence: felt252,
+    pub timestamp: u64,
+    pub resolved: bool,
+    pub slashed: bool,
+}
+
+/// Investigator anonymous profile — public pseudonym, not wallet address.
+#[derive(Copy, Drop, Serde, PartialEq, Debug)]
+pub struct InvestigatorProfile {
+    pub address: ContractAddress,
+    pub reputation: u64,
+    pub has_stake: bool,
+    pub stake_amount: u128,
+    pub is_slashed: bool,
+    pub eligible: bool,
 }

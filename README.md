@@ -8,9 +8,7 @@ truth-finding on **Starknet**, where bounty funding and winner payouts use
 pool, `privacy_invoke`, and real `privacy::objects::OpenNoteDeposit` — rather
 than simulated privacy or ordinary public ERC20 transfers.
 
-> **Status: Phases 0–6 complete, verified on Sepolia.** Development follows the gates in
-> [`CLINE_IMPLEMENTATION_PLAN.md`](./CLINE_IMPLEMENTATION_PLAN.md). STRK20 integration is proven via real Sepolia pool
-> `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91` (`Ready X` `0xdc46…420ca5`) and local `snforge` 12 tests. Mainnet `strk20.json` pending.
+> **Status: Phases 0–6 verified on Sepolia, evolving to creator-controlled bounty marketplace.** Verity is a privacy-preserving marketplace where bounty creators privately fund bounties, anonymous investigators with stake and reputation submit investigations, and creators directly select and privately reward winners. Development follows the gates in [`CLINE_IMPLEMENTATION_PLAN.md`](./CLINE_IMPLEMENTATION_PLAN.md). STRK20 integration proven via real Sepolia pool `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91` (`Ready X` `0xdc46…420ca5`) and local `snforge` 18 tests. `BountyManager V2` (staking + reputation, no verifiers) built locally, Sepolia deployment pending faucet funding. See [`docs/REPUTATION.md`](./docs/REPUTATION.md) for anonymous reputation design. Mainnet `strk20.json` pending.
 
 ## Canonical documents
 
@@ -24,11 +22,12 @@ than simulated privacy or ordinary public ERC20 transfers.
 
 ## What VERITY is (short version)
 
-- A requester creates a bounty (question / claim / investigation task).
-- Investigators submit off-chain evidence plus an on-chain reference.
-- A fixed set of **13 verifiers** evaluates submissions and votes; a submission
-  wins at **7 / 13**.
-- The winning investigator becomes eligible for a **claimable payout**.
+- A creator posts a bounty (question / claim / investigation) and sets a reward.
+- The reward is **funded privately** through the STRK20 privacy pool (`transfer OPEN + invoke VerityAnonymizer FUND_BOUNTY`).
+- Anonymous investigators — pseudonymous `Anonymous Investigator #A7F3`, not wallet addresses — stake a fixed amount (default `1 STRK`) and need a minimum reputation (default `60/100`) to be eligible.
+- Eligible investigators submit investigations; they build reputation while anonymous (wins `+10`, slashes `-20`).
+- The **bounty creator reviews** investigations and directly selects the winner — no verifier committee.
+- The winner **claims privately** (`RELEASE` → `OpenNoteDeposit` → private note) or the creator reclaims funds with a protocol fee if no entry deserves the reward.
 - Funding and payout move value through the **real STRK20 privacy pool**:
 
 ```text
@@ -99,11 +98,12 @@ wsl -d Ubuntu-24.04 -- bash -lc 'export PATH="$HOME/.local/bin:$PATH" && cd /mnt
 | Phase 0 — Foundation | ✅ Complete | `scarb build` + `snforge test` + `pnpm build` at `8180cb9` |
 | Phase 1 — Independent STRK20 proof | ✅ Complete (Sepolia) | Wallet `Ready X` `0xdc46…420ca5` shield/balance/transfer/withdraw via `wallet_strk20*` on Sepolia pool `0x0254…0d91` |
 | Phase 2 — VerityAnonymizer proof | ✅ Complete (local + Sepolia) | `VerityAnonymizer` `0x04b93a86…0ae4b` (class `0x495c6e8f…b090`) `pool-only` `privacy_invoke` → `Span<OpenNoteDeposit>`, `snforge` 9 tests |
-| Phase 3 — Private bounty funding | ✅ Complete | `BountyManager` `0x07e239e…ec56da1` `fund_bounty` via `VerityAnonymizer` `FUND_BOUNTY`, Sepolia tx `0x02d6ec…83072` + `0x0347…385e7`, local e2e `test_full_bounty_lifecycle` |
-| Phase 4 — Bounty mechanics | ✅ Complete | `7/13` voting, `submit`/`vote`/`winner`/`claimable`, `snforge` `test_full_bounty_lifecycle` + `test_double_vote_rejected` |
-| Phase 5 — Private payout | ✅ Complete | `VerityAnonymizer` `RELEASE` → `BountyManager.claim_payout` → `OpenNoteDeposit`, `Paid` |
-| Phase 6 — Frontend | ✅ Complete | `/`, `/bounties`, `/create`, `/bounty/[id]`, `/phase1-proof`, `/phase2-deploy` — `pnpm build` 7 routes |
-| Phase 7 — Mainnet | ⏳ Pending (Sepolia verified, mainnet `strk20.json` to be filled) |
+| Phase 3 — Private bounty funding | ✅ Complete | `BountyManager` `0x07e239e…ec56da1` `fund_bounty` via `VerityAnonymizer` `FUND_BOUNTY`, Sepolia tx `0x02d6ec…83072` + `0x0347…385e7`, local e2e `test_full_bounty_lifecycle` (now `V2` with creator selection) |
+| Phase 4 — Bounty mechanics | 🔄 Evolved — V2 (no verifiers) | **Old:** `7/13` voting → **New:** creator selects winner, `INVESTIGATOR_STAKE=1 STRK`, `minimum_reputation=60`, `submit_investigation` with stake+reputation gate, `report/slash` with `-20` reputation, `refund_bounty` with `5%` protocol fee, `snforge` 9 new tests (`test_report_and_slash`, `test_reputation_threshold`, etc.) — `18` total |
+| Phase 5 — Private payout | ✅ Complete | `VerityAnonymizer` `RELEASE` → `BountyManager.claim_payout` → `OpenNoteDeposit`, `Paid` (unchanged, now winner is creator-selected) |
+| Phase 6 — Frontend | ✅ Evolved | No verifier UI; `/` (Create→Fund→Investigate→Review→Reward), `/bounties` premium cards, `/create` (reward `1,550 STRK` persisted via `verity_bounty_<id>` + `felt` fallback), `/bounty/[id]` (funding `Amount to fund` pre-filled, eligibility `Reputation 60/ Stake 1 STRK`, staking, `Submit investigation`, creator `Select winner`/`Report`/`Reclaim funds` with fee, anonymous `#A7F3` profiles) — `pnpm build` 7 routes |
+| Reputation | ✅ `VerityNative` live, `IReputationProvider` abstraction ready | `BountyManager` internal `0–100` (stake→60, win +10 cap 100, slash -20 floor 0), `docs/REPUTATION.md` research: Ethos not natively Starknet-compatible without oracle/ZK, `EthosReputationProvider` pluggable via `set_reputation_provider` |
+| Phase 7 — Mainnet | ⏳ Pending (Sepolia V2 deployment pending faucet) | `BountyManager V2` built, dry-run fee `34.65 STRK` > `ready-sepolia` `19.8 STRK` — needs faucet then `declare` + `deploy` + wiring, then `strk20.json` mainnet |
 
 ## License
 

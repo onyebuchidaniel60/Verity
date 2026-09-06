@@ -13,19 +13,40 @@ import { useWalletStore } from "@/store/wallet";
 const NETWORK = "sepolia" as const;
 const POOL = STRK20[NETWORK].poolAddress as Address;
 
+// New lifecycle: Created(0) → Funded(1) → Open(2) → WinnerSelected(3) → Claimable(4) → Paid(5) → Refunded(6)
 const STATUS_META: Record<string, { label: string; cls: string; desc: string }> = {
   "0": { label: "Created", cls: "badge-created", desc: "Waiting to be funded" },
   "1": { label: "Funded", cls: "badge-funded", desc: "Ready to open" },
-  "2": { label: "Open", cls: "badge-open", desc: "Accepting entries" },
-  "3": { label: "Voting", cls: "badge-voting", desc: "Under review" },
-  "4": { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
-  "5": { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
-  "6": { label: "Paid", cls: "badge-paid", desc: "Completed" },
-  "7": { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
+  "2": { label: "Open", cls: "badge-open", desc: "Accepting investigations" },
+  "3": { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
+  "4": { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
+  "5": { label: "Paid", cls: "badge-paid", desc: "Completed" },
+  "6": { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
+  // Backwards compat for old Sepolia bounties that used Voting (3) etc.
+  "VOTING": { label: "Voting", cls: "badge-voting", desc: "Under review" },
+  "WINNER_SELECTED": { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
+  "CLAIMABLE": { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
+  "PAID": { label: "Paid", cls: "badge-paid", desc: "Completed" },
+  "REFUNDED": { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
 };
 
 function shortAddr(a: string) {
   return a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "";
+}
+
+function anonId(addr: string): string {
+  try {
+    const norm = validateAndParseAddress(addr);
+    const hex = BigInt(norm).toString(16).padStart(64, "0");
+    return `#${hex.slice(-4).toUpperCase()}`;
+  } catch {
+    try {
+      const hex = BigInt(addr).toString(16).padStart(64, "0");
+      return `#${hex.slice(-4).toUpperCase()}`;
+    } catch {
+      return "#????";
+    }
+  }
 }
 
 function normalizeAddr(a: string): string | null {
@@ -47,21 +68,11 @@ function formatReward(v: any): string {
     const weiPerStrk = 1000000000000000000n;
     const whole = n / weiPerStrk;
     const frac = n % weiPerStrk;
-    if (frac === 0n) {
-      return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} STRK`;
-    }
+    if (frac === 0n) return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} STRK`;
     let fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
-    // Limit display to 6 decimals for readability, but keep meaningful precision
-    if (fracStr.length > 6) {
-      // Show up to 6 decimals, trim trailing zeros already done
-      fracStr = fracStr.slice(0, 6).replace(/0+$/, "");
-    }
-    if (whole === 0n) {
-      // For <1 STRK, show 0.xxx
-      return `0.${fracStr} STRK`;
-    }
-    const wholeFormatted = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    return `${wholeFormatted}.${fracStr} STRK`;
+    if (fracStr.length > 6) fracStr = fracStr.slice(0, 6).replace(/0+$/, "");
+    if (whole === 0n) return `0.${fracStr} STRK`;
+    return `${whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fracStr} STRK`;
   } catch {
     return String(v ?? "—");
   }
@@ -82,15 +93,12 @@ function weiToStr(wei: string | bigint): string {
 }
 
 function humanToWei(s: string): string {
-  const trimmed = s.trim();
+  const trimmed = s.trim().replace(/,/g, "");
   if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error("Please enter a valid amount");
   const [whole, frac = ""] = trimmed.split(".");
   if (frac.length > 18) throw new Error("Too many decimal places (max 18)");
   const frac18 = (frac + "0".repeat(18)).slice(0, 18);
-  const weiStr = (whole === "0" || whole === "" ? "0" : whole) + frac18;
-  // Remove leading zeros but keep at least one digit
-  const normalized = weiStr.replace(/^0+/, "") || "0";
-  return BigInt(normalized).toString();
+  return BigInt((whole === "" ? "0" : whole) + frac18).toString();
 }
 
 export default function BountyDetailPage() {
@@ -101,13 +109,14 @@ export default function BountyDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
-  const [evidenceHash, setEvidenceHash] = useState("");
-  const [voteSubmission, setVoteSubmission] = useState("1");
+  const [evidence, setEvidence] = useState("");
   const [submissions, setSubmissions] = useState<any[]>([]);
   const [fundAmount, setFundAmount] = useState("");
   const [fundAmountError, setFundAmountError] = useState<string | null>(null);
   const [connectedAddr, setConnectedAddr] = useState<string | null>(null);
-  const [isVerifier, setIsVerifier] = useState<boolean | null>(null);
+  const [stakeInfo, setStakeInfo] = useState<{ hasStake: boolean; stakeAmount: string; reputation: number; minRep: number; isSlashed: boolean } | null>(null);
+  const [reportReason, setReportReason] = useState("");
+  const [selectedSubmission, setSelectedSubmission] = useState<number | null>(null);
 
   const walletStoreAddr = useWalletStore((s) => s.address);
   const walletConnected = useWalletStore((s) => s.connected);
@@ -146,13 +155,9 @@ export default function BountyDetailPage() {
       const r: any = await c.call("get_bounty", [id]);
       const b = r?.bounty ?? r;
       setBounty(b);
-      // Prefill funding amount with reward in STRK if empty
       const rewardWei = b?.reward_amount ?? b?.[2] ?? 0;
       const rewardStr = weiToStr(rewardWei);
-      if (!fundAmount) {
-        // Only prefill once, keep user edits afterwards
-        setFundAmount(rewardStr === "0" ? "" : rewardStr);
-      }
+      if (!fundAmount && rewardStr !== "0") setFundAmount(rewardStr);
       // Load submissions
       try {
         const cnt: any = await c.call("get_submission_count", [id]);
@@ -162,25 +167,37 @@ export default function BountyDetailPage() {
           try {
             const s: any = await c.call("get_submission", [id, i]);
             const sub = s?.submission ?? s;
-            const vAbi = [{ name: "get_vote_count", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ name: "count", type: "core::integer::u32" }], stateMutability: "view" }] as const;
-            const c2 = new Contract({ abi: vAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
-            const vc: any = await c2.call("get_vote_count", [id, i]);
-            const votes = Number(vc?.count ?? vc ?? 0);
-            list.push({ id: i, ...sub, votes });
+            list.push({ id: i, ...sub });
           } catch {}
         }
         setSubmissions(list);
       } catch {}
-      // Check verifier status if connected
+      // Load stake/reputation if connected
       if (walletStoreAddr) {
         try {
-          const vAbi = [{ name: "is_verifier", type: "function", inputs: [{ name: "account", type: "core::starknet::contract_address::ContractAddress" }], outputs: [{ name: "is_ver", type: "core::bool" }], stateMutability: "view" }] as const;
-          const c3 = new Contract({ abi: vAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
-          const res: any = await c3.call("is_verifier", [walletStoreAddr]);
-          const isV = res?.is_ver ?? res?.[0] ?? res;
-          setIsVerifier(Boolean(isV));
+          const repAbi = [
+            { name: "get_reputation", type: "function", inputs: [{ name: "account", type: "core::starknet::contract_address::ContractAddress" }], outputs: [{ name: "rep", type: "core::integer::u64" }], stateMutability: "view" },
+            { name: "has_stake", type: "function", inputs: [{ name: "account", type: "core::starknet::contract_address::ContractAddress" }], outputs: [{ name: "has", type: "core::bool" }], stateMutability: "view" },
+            { name: "is_slashed", type: "function", inputs: [{ name: "account", type: "core::starknet::contract_address::ContractAddress" }], outputs: [{ name: "slashed", type: "core::bool" }], stateMutability: "view" },
+            { name: "get_minimum_reputation", type: "function", inputs: [], outputs: [{ name: "min", type: "core::integer::u64" }], stateMutability: "view" },
+            { name: "get_stake_amount", type: "function", inputs: [], outputs: [{ name: "amt", type: "core::integer::u128" }], stateMutability: "view" },
+          ] as const;
+          const c2 = new Contract({ abi: repAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+          const [repRes, stakeRes, slashedRes, minRes, amtRes]: any = await Promise.all([
+            c2.call("get_reputation", [walletStoreAddr]),
+            c2.call("has_stake", [walletStoreAddr]),
+            c2.call("is_slashed", [walletStoreAddr]),
+            c2.call("get_minimum_reputation", []),
+            c2.call("get_stake_amount", []),
+          ]);
+          const rep = Number(repRes?.rep ?? repRes ?? 0);
+          const hasStake = Boolean(stakeRes?.has ?? stakeRes);
+          const isSlashed = Boolean(slashedRes?.slashed ?? slashedRes);
+          const minRep = Number(minRes?.min ?? minRes ?? 60);
+          const stakeAmt = String(amtRes?.amt ?? amtRes ?? 0);
+          setStakeInfo({ hasStake, stakeAmount: stakeAmt, reputation: rep, minRep, isSlashed });
         } catch {
-          setIsVerifier(null);
+          setStakeInfo(null);
         }
       }
     } catch (e) {
@@ -192,25 +209,12 @@ export default function BountyDetailPage() {
 
   useEffect(() => {
     load();
-  }, [id]);
+  }, [id, walletStoreAddr]);
 
   useEffect(() => {
-    // Keep connectedAddr in sync with wallet store and also try to read from connectWallet if needed
     if (walletStoreAddr) setConnectedAddr(walletStoreAddr);
     else setConnectedAddr(null);
   }, [walletStoreAddr]);
-
-  // Also on mount, try to get address from wallet if store empty but wallet is connected via discovery
-  useEffect(() => {
-    async function syncAddr() {
-      if (!walletStoreAddr && typeof window !== "undefined") {
-        try {
-          // Don't auto-connect, just try to read if already connected via previous page
-        } catch {}
-      }
-    }
-    syncAddr();
-  }, []);
 
   async function ensureConnected(): Promise<string> {
     if (connectedAddr && walletConnected) return connectedAddr;
@@ -231,7 +235,6 @@ export default function BountyDetailPage() {
       const rawMsg = e instanceof Error ? e.message : String(e);
       const msgLower = rawMsg.toLowerCase();
       console.error(`[bounty ${id}] ${key} failed`, e);
-      // Deep inspection for paymaster/contract revert
       try {
         console.error(`[bounty ${id}] error details`, {
           code: e?.code,
@@ -239,50 +242,36 @@ export default function BountyDetailPage() {
           data: e?.data,
           cause: e?.cause,
           execution_error: e?.data?.execution_error ?? e?.cause?.data?.execution_error,
-          revert_error: e?.data?.revert_error,
-          full: (() => {
-            try { return JSON.stringify(e, Object.getOwnPropertyNames(e), 2).slice(0, 4000); } catch { return String(e); }
-          })()
+          full: (() => { try { return JSON.stringify(e, Object.getOwnPropertyNames(e), 2).slice(0, 4000); } catch { return String(e); } })()
         });
       } catch {}
-      if (rawMsg.includes("USER_REFUSED") || rawMsg.includes("UserRejected") || msgLower.includes("user rejected") || msgLower.includes("cancelled")) {
-        setError("Transaction cancelled — you declined in your wallet. No changes were made.");
-      } else if (msgLower.includes("not_registered") || msgLower.includes("118")) {
-        setError("Your wallet isn’t registered for private transactions yet. Open your wallet, enable private mode, and try again.");
-      } else if (msgLower.includes("insufficient") || msgLower.includes("balance") || msgLower.includes("insufficient_private_balance")) {
-        setError("Insufficient funds. Make sure you have enough STRK (and private balance if required) and try again.");
-      } else if (msgLower.includes("not_verifier")) {
-        setError("Only verified reviewers can vote on this bounty.");
-      } else if (msgLower.includes("already_voted")) {
-        setError("You’ve already voted on this bounty.");
-      } else if (msgLower.includes("invalid_request_payload")) {
-        setError("We couldn’t prepare the private transaction. Please check the amount and try again.");
-      } else if (msgLower.includes("not_pool") || msgLower.includes("not_anonymizer")) {
-        setError("This action must go through the secure private flow. Please use the provided button.");
-      } else if (msgLower.includes("amount_mismatch")) {
-        setError("Funding amount does not match the bounty reward. Please enter the exact reward amount.");
-      } else if (msgLower.includes("not_created")) {
-        setError("This bounty can’t be funded right now — it’s no longer in the created state. Please refresh.");
-      } else if (msgLower.includes("paymaster") || msgLower.includes("transaction_execution_error") || msgLower.includes("156")) {
-        // Check underlying data for more specific revert reason
+      if (rawMsg.includes("USER_REFUSED") || msgLower.includes("user rejected") || msgLower.includes("cancelled")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
+      else if (msgLower.includes("not_registered") || msgLower.includes("118")) setError("Your wallet isn’t registered for private transactions yet. Open your wallet, enable private mode, and try again.");
+      else if (msgLower.includes("insufficient") || msgLower.includes("balance") || msgLower.includes("insufficient_private_balance")) setError("Insufficient funds. Make sure you have enough STRK and try again.");
+      else if (msgLower.includes("not_staked")) setError("You need to stake before you can submit. Stake the required amount to become eligible.");
+      else if (msgLower.includes("is_slashed")) setError("Your investigator profile has been slashed and can’t submit. Contact support if you believe this is an error.");
+      else if (msgLower.includes("reputation_too_low")) setError(`Your reputation is too low. Required: ${stakeInfo?.minRep ?? 60}, yours: ${stakeInfo?.reputation ?? 0}. Build reputation to submit.`);
+      else if (msgLower.includes("creator_cannot_submit")) setError("This is your bounty. You can't submit an investigation to your own bounty.");
+      else if (msgLower.includes("not_creator") && key === "select") setError("Only the bounty creator can select a winner.");
+      else if (msgLower.includes("not_creator") && key === "refund") setError("Only the creator can reclaim funds.");
+      else if (msgLower.includes("already_reported")) setError("This investigation has already been reported.");
+      else if (msgLower.includes("already_slashed")) setError("This investigator has already been slashed for this bounty.");
+      else if (msgLower.includes("not_pending")) setError("This investigation is no longer pending and can’t be reported.");
+      else if (msgLower.includes("already_has_winner")) setError("A winner has already been selected for this bounty.");
+      else if (msgLower.includes("not_open")) setError("This bounty is not open for submissions right now.");
+      else if (msgLower.includes("invalid_request_payload")) setError("We couldn’t prepare the private transaction. Please check the amount and try again.");
+      else if (msgLower.includes("amount_mismatch")) setError("Funding amount does not match the bounty reward. Please enter the exact reward amount.");
+      else if (msgLower.includes("not_created")) setError("This bounty can’t be funded right now — it’s no longer in the created state.");
+      else if (msgLower.includes("paymaster") || msgLower.includes("transaction_execution_error") || msgLower.includes("156")) {
         const dataStr = JSON.stringify(e?.data ?? e?.cause ?? "");
-        if (dataStr.includes("AMOUNT_MISMATCH")) setError("Funding amount does not match the bounty reward. Please enter the exact reward shown.");
+        if (dataStr.includes("AMOUNT_MISMATCH")) setError("Funding amount does not match the bounty reward.");
         else if (dataStr.includes("NOT_CREATED")) setError("This bounty is already funded or not in a state that can be funded.");
-        else if (dataStr.includes("BOUNTY_NOT_FOUND")) setError("Bounty not found on-chain. It may not exist or the network is unavailable.");
-        else if (dataStr.includes("REPLAY")) setError("This transaction was already processed. Please refresh and try again.");
-        else if (dataStr.includes("INSUFFICIENT")) setError("Insufficient balance for this transaction. Add funds and try again.");
-        else if (dataStr.includes("NOT_REGISTERED")) setError("Your wallet isn’t registered for private transactions yet. Enable private mode in your wallet.");
-        else setError("Transaction failed during execution. This can be due to amount, bounty status, or funds. See console for details and try again.");
-      } else if (msgLower.includes("validate unhandled")) {
-        setError("We couldn’t prepare the transaction. Please try a different amount.");
-      } else if (msgLower.includes("not_claimable") || msgLower.includes("claimable")) {
-        setError("This bounty is not ready to be claimed yet.");
-      } else if (msgLower.includes("not_authorized_claim") || msgLower.includes("not_authorized")) {
-        setError("Only the winning entry can claim this reward.");
-      } else {
-        // Generic but retain hint that details are in console
-        setError("Something went wrong. Please try again. (See console for technical details)");
-      }
+        else if (dataStr.includes("REPUTATION_TOO_LOW")) setError("Your reputation is too low to submit.");
+        else if (dataStr.includes("NOT_STAKED")) setError("You need to stake first.");
+        else setError("Transaction failed during execution. See console for details and try again.");
+      } else if (msgLower.includes("not_claimable")) setError("This bounty is not ready to be claimed yet.");
+      else if (msgLower.includes("not_authorized_claim")) setError("Only the winner can claim this reward.");
+      else setError("Something went wrong. Please try again. (See console for details)");
     } finally {
       setBusy(null);
     }
@@ -293,23 +282,10 @@ export default function BountyDetailPage() {
       if (!bounty) throw new Error("Bounty not loaded");
       const rewardWei = bounty.reward_amount ?? bounty.rewardAmount ?? bounty[2] ?? 0;
       const rewardWeiStr = BigInt(String(rewardWei)).toString();
-      // Validate user-entered amount
-      if (!fundAmount.trim()) {
-        setFundAmountError("Please enter an amount");
-        throw new Error("Please enter a funding amount");
-      }
+      if (!fundAmount.trim()) { setFundAmountError("Please enter an amount"); throw new Error("Please enter a funding amount"); }
       let enteredWei: string;
-      try {
-        enteredWei = humanToWei(fundAmount);
-      } catch (e: any) {
-        setFundAmountError(e.message);
-        throw e;
-      }
-      if (BigInt(enteredWei) <= 0n) {
-        setFundAmountError("Amount must be greater than 0");
-        throw new Error("Amount must be greater than 0");
-      }
-      // Enforce exact match with bounty reward (contract requires equality)
+      try { enteredWei = humanToWei(fundAmount); } catch (e: any) { setFundAmountError(e.message); throw e; }
+      if (BigInt(enteredWei) <= 0n) { setFundAmountError("Amount must be greater than 0"); throw new Error("Amount must be greater than 0"); }
       if (BigInt(enteredWei) !== BigInt(rewardWeiStr)) {
         const rewardStr = formatReward(rewardWeiStr);
         setFundAmountError(`Amount must equal the bounty reward: ${rewardStr}`);
@@ -318,82 +294,51 @@ export default function BountyDetailPage() {
       setFundAmountError(null);
       const address = await ensureConnected();
       const { wallet } = await connectWallet();
-      // Re-use address from ensureConnected, but also ensure wallet matches
       const cap = await (await import("@/strk20-proof/strk20-proof")).detectStrk20Capability(wallet);
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
-      // Pre-check private balance to avoid paymaster failure due to insufficient private funds
       try {
         const balances: any = await account.strk20Balances([STRK20[NETWORK].strkTokenAddress as Address]);
         console.info("[fundPrivate] private balances before", balances);
         const entry = (balances as any[]).find((b: any) => String(b.token).toLowerCase() === STRK20[NETWORK].strkTokenAddress.toLowerCase());
-        if (entry) {
-          const bal = BigInt(entry.balance);
-          if (bal < BigInt(enteredWei)) {
-            throw new Error(`INSUFFICIENT_PRIVATE_BALANCE: private balance ${entry.balance} (${formatReward(entry.balance)}) < required ${enteredWei} (${formatReward(enteredWei)}) — shield more STRK first`);
-          }
-        } else {
-          console.warn("[fundPrivate] no private balance entry for STRK — wallet may be not registered or zero");
-        }
+        if (entry && BigInt(entry.balance) < BigInt(enteredWei)) throw new Error(`INSUFFICIENT_PRIVATE_BALANCE: private balance ${entry.balance} < required ${enteredWei}`);
       } catch (e: any) {
-        if (String(e.message).includes("NOT_REGISTERED") || String(e.message).includes("118")) throw e;
-        if (String(e.message).includes("INSUFFICIENT")) throw e;
-        console.warn("[fundPrivate] private balance check skipped (non-fatal)", e?.message);
+        if (String(e.message).includes("NOT_REGISTERED") || String(e.message).includes("INSUFFICIENT")) throw e;
+        console.warn("[fundPrivate] private balance check skipped", e?.message);
       }
       const bountyId = Number(id);
       const amountFelt = "0x" + BigInt(enteredWei).toString(16);
       const bountyIdFelt = "0x" + BigInt(String(bountyId)).toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      const operation = "0x46554e445f424f554e5459"; // 'FUND_BOUNTY' as felt
+      const operation = "0x46554e445f424f554e5459";
       const actionArray = [
         { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
         { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}"] } as any,
       ];
       console.info("[fundPrivate] STRK20 action array", JSON.stringify(actionArray, null, 2));
       actionArray.forEach((act: any, idx: number) => {
-        console.info(`[fundPrivate] action[${idx}]`, act);
-        if (act.calldata) {
-          act.calldata.forEach((c: any, j: number) => {
-            console.info(`[fundPrivate] action[${idx}].calldata[${j}]`, { value: c, type: typeof c, stringValue: String(c) });
-          });
-        }
+        if (act.calldata) act.calldata.forEach((c: any, j: number) => console.info(`[fundPrivate] action[${idx}].calldata[${j}]`, { value: c, type: typeof c }));
       });
-      console.info("[fundPrivate] pool", POOL, "token", STRK20[NETWORK].strkTokenAddress, "bountyId", bountyId, "bountyIdFelt", bountyIdFelt, "reward FRI", amountFelt, "enteredWei", enteredWei, "nonce", nonce);
+      console.info("[fundPrivate] pool", POOL, "token", STRK20[NETWORK].strkTokenAddress, "bountyId", bountyId, "bountyIdFelt", bountyIdFelt, "amountFelt", amountFelt);
       console.info("[fundPrivate] wallet API versions", cap.walletApiVersions, "supported", cap.supported);
-      console.info("[fundPrivate] VerityAnonymizer", CONTRACTS.verityAnonymizer, "BountyManager", CONTRACTS.bountyManager);
-      // Pre-flight: verify bounty is still Created
       try {
         const checkContract = new Contract({ abi: [{ name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "bounty", type: "Bounty" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
         const chk: any = await checkContract.call("get_bounty", [bountyId]);
         const chkB = chk?.bounty ?? chk;
         const status = String(chkB?.status ?? chkB?.[3] ?? "");
         console.info("[fundPrivate] bounty status before", chkB, "statusKey", status);
-        if (status !== "0" && status !== "CREATED" && status !== "Created") {
-          throw new Error(`NOT_CREATED: bounty status is ${status}, expected Created (0)`);
-        }
-        // Also verify pool and anonymizer wiring
-        const anonCheck = new Contract({ abi: [{ name: "get_pool", type: "function", inputs: [], outputs: [{ name: "pool", type: "core::starknet::contract_address::ContractAddress" }], stateMutability: "view" }] as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: provider });
-        const poolOnChain: any = await anonCheck.call("get_pool", []);
-        const poolAddr = poolOnChain?.pool ?? poolOnChain;
-        console.info("[fundPrivate] on-chain VerityAnonymizer.get_pool()", poolAddr, "expected", POOL);
+        if (status !== "0" && status !== "CREATED" && status !== "Created") throw new Error(`NOT_CREATED: bounty status is ${status}, expected Created (0)`);
       } catch (e: any) {
-        console.warn("[fundPrivate] pre-flight check warning", e);
-        // Don't block if check fails due to network, but surface NOT_CREATED explicitly
         if (String(e.message).includes("NOT_CREATED")) throw e;
+        console.warn("[fundPrivate] pre-flight warning", e);
       }
       try {
-        console.info("[fundPrivate] calling wallet_strk20InvokeTransaction with", JSON.stringify(actionArray, null, 2));
+        console.info("[fundPrivate] calling wallet_strk20InvokeTransaction");
         const res: any = await account.strk20InvokeTransaction(actionArray);
         console.info("[fundPrivate] wallet response", res);
         return res.transaction_hash ?? res.hash;
       } catch (e: any) {
-        console.error("[fundPrivate] wallet_strk20InvokeTransaction error", e);
-        console.error("[fundPrivate] error code", e?.code, "message", e?.message, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
-        try {
-          console.error("[fundPrivate] full error", JSON.stringify(e, Object.getOwnPropertyNames(e), 2).slice(0, 8000));
-        } catch {}
-        // Try to surface inner Starknet revert
-        const inner = e?.data?.execution_error ?? e?.cause?.data?.execution_error ?? e?.data?.revert_error ?? "";
-        if (inner) console.error("[fundPrivate] inner execution_error", inner);
+        console.error("[fundPrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
+        try { console.error("[fundPrivate] full error", JSON.stringify(e, Object.getOwnPropertyNames(e), 2).slice(0, 8000)); } catch {}
         throw e;
       }
     });
@@ -401,50 +346,70 @@ export default function BountyDetailPage() {
   const open = () =>
     guard("open", async () => {
       const { wallet } = await connectWallet();
-      const addr = await ensureConnected();
-      // Only creator or owner can open. Let contract enforce, but pre-check for nicer message.
-      const creator = bounty?.creator ?? bounty?.[1];
-      if (creator && connectedAddr) {
-        const normCreator = normalizeAddr(String(creator));
-        const normConnected = normalizeAddr(connectedAddr);
-        if (normCreator && normConnected && normCreator !== normConnected) {
-          // Check if connected is owner? For now, allow only creator; otherwise warn
-          // But contract allows creator or owner. We don't know owner address off-chain easily, so allow attempt and let contract revert with NOT_CREATOR.
-          console.info("[open] non-creator trying to open", { creator, connectedAddr });
-        }
-      }
+      await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
       const c = new Contract({ abi: [{ name: "open_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
       const res: any = await c.invoke("open_bounty", [id]);
       return res.transaction_hash ?? res.hash;
     });
 
-  const submit = () =>
-    guard("submit", async () => {
-      if (!evidenceHash.trim()) throw new Error("Please add an entry reference");
-      const creator = bounty?.creator ?? bounty?.[1];
-      const normCreator = creator ? normalizeAddr(String(creator)) : null;
-      const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
-      if (normCreator && normConnected && normCreator === normConnected) {
-        throw new Error("This is your bounty. You can't submit an entry to your own bounty.");
-      }
+  const stake = () =>
+    guard("stake", async () => {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "submit_evidence", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "evidence_hash", type: "core::felt252" }], outputs: [{ name: "submission_id", type: "core::integer::u64" }], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("submit_evidence", [id, evidenceHash]);
+      const c = new Contract({ abi: [{ name: "stake", type: "function", inputs: [], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("stake", []);
       return res.transaction_hash ?? res.hash;
     });
 
-  const vote = () =>
-    guard("vote", async () => {
+  const submit = () =>
+    guard("submit", async () => {
+      if (!evidence.trim()) throw new Error("Please add investigation details");
+      const creator = bounty?.creator ?? bounty?.[1];
+      const normCreator = creator ? normalizeAddr(String(creator)) : null;
+      const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
+      if (normCreator && normConnected && normCreator === normConnected) throw new Error("CREATOR_CANNOT_SUBMIT: This is your bounty. You can't submit an investigation to your own bounty.");
       const { wallet } = await connectWallet();
       await ensureConnected();
-      // Pre-check verifier
-      if (isVerifier === false) throw new Error("NOT_VERIFIER: Only verified reviewers can vote");
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "vote", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("vote", [id, Number(voteSubmission)]);
+      // Convert evidence string to felt (short string, truncate)
+      const evidenceFelt = evidence.trim().slice(0, 31) ? "0x" + Buffer.from(evidence.trim().slice(0, 31)).toString("hex") : "0x1";
+      const c = new Contract({ abi: [{ name: "submit_investigation", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "evidence_hash", type: "core::felt252" }], outputs: [{ name: "submission_id", type: "core::integer::u64" }], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("submit_investigation", [id, evidenceFelt]);
+      return res.transaction_hash ?? res.hash;
+    });
+
+  const selectWinner = (submissionId: number) =>
+    guard("select", async () => {
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const c = new Contract({ abi: [{ name: "select_winner", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("select_winner", [id, submissionId]);
+      return res.transaction_hash ?? res.hash;
+    });
+
+  const report = (submissionId: number) =>
+    guard("report", async () => {
+      if (!reportReason.trim()) throw new Error("Please provide a reason for the report");
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const reasonFelt = "0x" + Buffer.from(reportReason.trim().slice(0, 31)).toString("hex");
+      const evidenceFelt = "0x" + Buffer.from("report-evidence").toString("hex");
+      const c = new Contract({ abi: [{ name: "report_submission", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "reason", type: "core::felt252" }, { name: "evidence", type: "core::felt252" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("report_submission", [id, submissionId, reasonFelt, evidenceFelt]);
+      return res.transaction_hash ?? res.hash;
+    });
+
+  const refund = () =>
+    guard("refund", async () => {
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const c = new Contract({ abi: [{ name: "refund_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("refund_bounty", [id]);
       return res.transaction_hash ?? res.hash;
     });
 
@@ -453,12 +418,8 @@ export default function BountyDetailPage() {
       const winner = bounty?.winner ?? bounty?.[7];
       const normWinner = winner ? normalizeAddr(String(winner)) : null;
       const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
-      if (normWinner && normConnected && normWinner !== normConnected) {
-        throw new Error("NOT_AUTHORIZED_CLAIM: Only the winner can claim this reward");
-      }
-      if (!winner || String(winner) === "0x0" || winner === 0) {
-        throw new Error("No winner selected yet");
-      }
+      if (normWinner && normConnected && normWinner !== normConnected) throw new Error("NOT_AUTHORIZED_CLAIM: Only the winner can claim this reward");
+      if (!winner || String(winner) === "0x0" || winner === 0) throw new Error("No winner selected yet");
       const { wallet, address } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
@@ -466,7 +427,7 @@ export default function BountyDetailPage() {
       const bountyIdFelt = "0x" + BigInt(bountyId).toString(16);
       const amountFelt = "0x" + BigInt(String(bounty?.reward_amount ?? bounty?.rewardAmount ?? 1000)).toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      const operation = "0x52454c45415345"; // 'RELEASE' as felt
+      const operation = "0x52454c45415345";
       const actionArray = [
         { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
         { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}"] } as any,
@@ -477,11 +438,7 @@ export default function BountyDetailPage() {
         console.info("[claim] wallet response", res);
         return res.transaction_hash ?? res.hash;
       } catch (e: any) {
-        console.error("[claim] wallet_strk20InvokeTransaction error", e);
-        console.error("[claim] error code", e?.code, "message", e?.message, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
-        try {
-          console.error("[claim] full error", JSON.stringify(e, Object.getOwnPropertyNames(e), 2).slice(0, 8000));
-        } catch {}
+        console.error("[claim] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
         throw e;
       }
     });
@@ -528,12 +485,13 @@ export default function BountyDetailPage() {
   })();
   const displayTitle = storedMeta?.title || `Bounty #${id}`;
   const displayDesc = storedMeta?.description || "Investigation bounty — evidence helps verify the claim.";
-  const isPaid = statusKey === "6" || statusKey === "PAID";
-  const isClaimable = statusKey === "5" || statusKey === "CLAIMABLE";
-  const isVoting = statusKey === "3" || statusKey === "VOTING";
+  const isPaid = statusKey === "5" || statusKey === "PAID";
+  const isClaimable = statusKey === "4" || statusKey === "CLAIMABLE";
+  const isWinnerSelected = statusKey === "3" || statusKey === "WINNER_SELECTED";
   const isOpen = statusKey === "2" || statusKey === "OPEN";
   const isFunded = statusKey === "1" || statusKey === "FUNDED";
   const isCreated = statusKey === "0" || statusKey === "CREATED";
+  const isRefunded = statusKey === "6" || statusKey === "REFUNDED";
   const creatorAddr = String(bounty?.creator ?? bounty?.[1] ?? "");
   const winnerAddr = String(bounty?.winner ?? bounty?.[7] ?? "");
   const normCreator = normalizeAddr(creatorAddr);
@@ -545,11 +503,21 @@ export default function BountyDetailPage() {
   const timeline = [
     { key: "Created", done: true, current: isCreated },
     { key: "Funded", done: !isCreated, current: isFunded },
-    { key: "Open", done: isOpen || isVoting || isClaimable || isPaid, current: isOpen },
-    { key: "Voting", done: isVoting || isClaimable || isPaid, current: isVoting },
-    { key: "Winner", done: isClaimable || isPaid, current: isClaimable },
-    { key: "Paid", done: isPaid, current: isPaid },
+    { key: "Open", done: isOpen || isWinnerSelected || isClaimable || isPaid || isRefunded, current: isOpen },
+    { key: "Winner", done: isWinnerSelected || isClaimable || isPaid, current: isWinnerSelected },
+    { key: "Paid", done: isPaid, current: isPaid || isClaimable },
   ];
+
+  const eligibility = stakeInfo
+    ? {
+        hasStake: stakeInfo.hasStake,
+        reputation: stakeInfo.reputation,
+        minRep: stakeInfo.minRep,
+        isSlashed: stakeInfo.isSlashed,
+        eligible: stakeInfo.hasStake && !stakeInfo.isSlashed && stakeInfo.reputation >= stakeInfo.minRep,
+        stakeAmountStr: formatReward(stakeInfo.stakeAmount),
+      }
+    : null;
 
   return (
     <main>
@@ -594,10 +562,14 @@ export default function BountyDetailPage() {
               <span style={{ color: "var(--text-muted)" }}>Created</span>
               <span>{bounty.created_at ? new Date(Number(bounty.created_at) * 1000).toLocaleDateString() : "—"}</span>
             </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--text-muted)" }}>Submissions</span>
+              <span>{submissions.length}</span>
+            </div>
             {bounty.winner && String(bounty.winner) !== "0x0" && String(bounty.winner) !== "0" && (
               <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
                 <span style={{ color: "var(--text-muted)" }}>Winner</span>
-                <span style={{ fontFamily: "Fragment Mono", fontSize: 12 }}>{shortAddr(winnerAddr)} {isWinner && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
+                <span style={{ fontFamily: "Fragment Mono", fontSize: 12 }}>{anonId(winnerAddr)} {isWinner && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
               </div>
             )}
             <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -608,23 +580,68 @@ export default function BountyDetailPage() {
         </div>
       )}
 
+      {/* Investigator eligibility panel — shown when not creator and bounty open */}
+      {!isCreator && isOpen && (
+        <div className="card card-pad" style={{ marginBottom: 16, borderColor: eligibility?.eligible ? "var(--border)" : "var(--amber-border)" }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Your eligibility</h3>
+          {!connectedAddr ? (
+            <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>Connect your wallet to check eligibility.</p>
+          ) : !eligibility ? (
+            <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>Loading eligibility…</p>
+          ) : eligibility.isSlashed ? (
+            <div className="alert alert-error" style={{ margin: 0 }}>
+              <span>⚠</span>
+              <div><strong>Profile slashed</strong><div style={{ opacity: 0.85, marginTop: 4 }}>You can’t submit investigations while slashed.</div></div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-muted)" }}>Reputation</span>
+                <span style={{ fontWeight: 600 }}>{eligibility.reputation} / 100 {eligibility.reputation >= eligibility.minRep ? "✓" : "✗"}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-muted)" }}>Required</span>
+                <span>{eligibility.minRep}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-muted)" }}>Stake</span>
+                <span>{eligibility.hasStake ? `${eligibility.stakeAmountStr} ✓` : `${eligibility.stakeAmountStr} — not staked ✗`}</span>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600, color: eligibility.eligible ? "var(--text)" : "var(--amber)" }}>
+                {eligibility.eligible ? "✓ Eligible to submit" : "✗ Not eligible — stake or build reputation"}
+              </div>
+              {!eligibility.hasStake && (
+                <button disabled={!!busy} onClick={stake} className="btn btn-secondary" style={{ marginTop: 8 }}>
+                  {busy === "stake" ? "Staking…" : `Stake ${eligibility.stakeAmountStr} to become eligible`}
+                </button>
+              )}
+            </div>
+          )}
+          {eligibility && !eligibility.eligible && !eligibility.isSlashed && (
+            <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "8px 0 0", lineHeight: 1.4 }}>
+              {eligibility.reputation < eligibility.minRep ? `You need a higher reputation (have ${eligibility.reputation}, need ${eligibility.minRep}). Wins increase reputation; slashes reduce it.` : "Stake the required amount to submit."}
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="card card-pad" style={{ marginBottom: 16 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Actions</h3>
-        {/* Contextual guidance */}
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px", lineHeight: 1.5 }}>
-          {isCreated && (isCreator ? "This bounty is waiting for funding. Enter the reward amount and fund it privately." : "This bounty is waiting for funding. The creator will fund it to make it active.")}
-          {isFunded && "Bounty funded. The creator can now open it for entries."}
-          {isOpen && (isCreator ? "This is your bounty. You can't submit an entry to your own bounty." : "Bounty is open. Share your entry for review.")}
-          {isVoting && "Voting is active. Verified reviewers select the best entry."}
-          {isClaimable && (isWinner ? "You won! Claim your reward privately." : isCreator ? "A winner has been selected. You can release the reward." : "A winner has been selected. Awaiting payout.")}
+          {isCreated && (isCreator ? "This bounty is waiting for funding. Enter the reward amount and fund it privately." : "This bounty is waiting for funding.")}
+          {isFunded && "Bounty funded. The creator can now open it for investigations."}
+          {isOpen && (isCreator ? "Investigations are coming in. Review them below and select a winner when ready. You can also reclaim funds if no entry deserves the reward." : eligibility?.eligible ? "Bounty is open. Share your investigation for review." : "Bounty is open — check eligibility above.")}
+          {isWinnerSelected && "A winner has been selected. The reward is ready to be released."}
+          {isClaimable && (isWinner ? "You won! Claim your reward privately." : isCreator ? "A winner has been selected. The reward will be released to the winner." : "A winner has been selected. Awaiting payout.")}
           {isPaid && "This bounty is complete. The reward has been released."}
+          {isRefunded && "This bounty was refunded. Funds have been returned to the creator (a protocol fee may have been charged)."}
         </p>
 
         <div style={{ display: "grid", gap: 10 }}>
           {isCreated && (
             <div style={{ display: "grid", gap: 10, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
               <div>
-                <label className="label" htmlFor="fund-amount">Funding amount</label>
+                <label className="label" htmlFor="fund-amount">Amount to fund</label>
                 <div style={{ position: "relative" }}>
                   <input
                     id="fund-amount"
@@ -641,50 +658,45 @@ export default function BountyDetailPage() {
                   <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: "var(--text-muted)", fontWeight: 600 }}>STRK</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, gap: 8, flexWrap: "wrap" }}>
-                  <span className="help" style={{ margin: 0 }}>Required: {formatReward(reward)} — must match exactly</span>
-                  <button type="button" className="btn btn-ghost" style={{ padding: "4px 8px", fontSize: 12, height: 28 }} onClick={() => setFundAmount(weiToStr(reward))}>Use required amount</button>
+                  <span className="help" style={{ margin: 0 }}>This is the reward amount set for this bounty.</span>
+                  <button type="button" className="btn btn-ghost" style={{ padding: "4px 8px", fontSize: 12, height: 28 }} onClick={() => setFundAmount(weiToStr(reward))}>Use reward amount</button>
                 </div>
                 {fundAmountError && <div style={{ fontSize: 12, color: "var(--red)", marginTop: 6 }}>{fundAmountError}</div>}
               </div>
               <button disabled={!!busy} onClick={fundPrivate} className="btn btn-primary">
                 {busy === "fund" ? "Confirm in wallet…" : "Fund privately"}
               </button>
-              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>Your wallet will open to approve the private funding. This uses a secure in-pool transfer.</p>
+              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>This amount will be privately committed to this bounty.</p>
             </div>
           )}
           {isFunded && (
             <button disabled={!!busy} onClick={open} className="btn btn-primary">
-              {busy === "open" ? "Processing…" : isCreator ? "Open for entries" : "Bounty funded — awaiting opening"}
+              {busy === "open" ? "Processing…" : isCreator ? "Open for investigations" : "Bounty funded — awaiting creator to open"}
             </button>
           )}
           {isOpen && !isCreator && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <input className="input" placeholder="Entry reference (hash)" value={evidenceHash} onChange={(e) => setEvidenceHash(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
-              <button disabled={!!busy} onClick={submit} className="btn btn-primary">
-                {busy === "submit" ? "Submitting…" : "Submit entry"}
+            <div style={{ display: "grid", gap: 8 }}>
+              <label className="label" htmlFor="evidence">Your investigation</label>
+              <textarea id="evidence" className="textarea" rows={4} placeholder="Describe your findings, evidence, links…" value={evidence} onChange={(e) => setEvidence(e.target.value)} />
+              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>I understand that submitting a fraudulent or misleading investigation may result in loss of my stake.</p>
+              <button disabled={!!busy || !eligibility?.eligible} onClick={submit} className="btn btn-primary">
+                {busy === "submit" ? "Submitting…" : "Submit investigation"}
               </button>
+              {!eligibility?.eligible && connectedAddr && <div style={{ fontSize: 12, color: "var(--amber)" }}>You’re not currently eligible to submit.</div>}
             </div>
           )}
           {isOpen && isCreator && (
-            <div className="alert alert-warn" style={{ margin: 0 }}>
-              <span>⚠</span>
-              <div><strong>This is your bounty</strong><div style={{ opacity: 0.85, marginTop: 4 }}>You can't submit an entry to your own bounty.</div></div>
-            </div>
-          )}
-          {isVoting && (
             <div style={{ display: "grid", gap: 8 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <input className="input" style={{ maxWidth: 120 }} value={voteSubmission} onChange={(e) => setVoteSubmission(e.target.value)} placeholder="Entry ID" />
-                <button disabled={!!busy} onClick={vote} className="btn btn-primary">
-                  {busy === "vote" ? "Voting…" : "Vote for entry"}
-                </button>
-                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>7 of 13 reviewers needed</span>
+              <div className="alert alert-warn" style={{ margin: 0 }}>
+                <span>◈</span>
+                <div><strong>Review investigations below</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Select a winner when you’re ready, or reclaim funds if none deserve the reward.</div></div>
               </div>
-              {isVerifier === false && <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Only verified reviewers can vote. Your wallet is not in the reviewer set.</div>}
-              {isVerifier === true && <div style={{ fontSize: 12, color: "var(--accent)" }}>You are a verified reviewer.</div>}
+              <button disabled={!!busy} onClick={refund} className="btn btn-secondary">
+                {busy === "refund" ? "Reclaiming…" : "No winner — reclaim funds (protocol fee applies)"}
+              </button>
             </div>
           )}
-          {isClaimable && (
+          {(isWinnerSelected || isClaimable) && (
             <>
               {isWinner ? (
                 <button disabled={!!busy} onClick={claim} className="btn btn-primary">
@@ -692,18 +704,19 @@ export default function BountyDetailPage() {
                 </button>
               ) : isCreator ? (
                 <div className="alert alert-warn" style={{ margin: 0 }}>
-                  <span>⚠</span>
-                  <div><strong>Winner selected</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Only the winning address can claim this reward privately.</div></div>
+                  <span>◈</span>
+                  <div><strong>Winner selected: {anonId(winnerAddr)}</strong><div style={{ opacity: 0.85, marginTop: 4 }}>The winner will claim the reward privately.</div></div>
                 </div>
               ) : (
                 <div className="alert alert-warn" style={{ margin: 0 }}>
-                  <span>⚠</span>
-                  <div><strong>Awaiting winner claim</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Only the selected winner can claim this reward.</div></div>
+                  <span>◈</span>
+                  <div><strong>Awaiting winner claim</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Winner {anonId(winnerAddr)} will claim.</div></div>
                 </div>
               )}
             </>
           )}
-          {isPaid && <div className="alert alert-success">✓ Reward released — check your private balance in your wallet.</div>}
+          {isPaid && <div className="alert alert-success">✓ Reward released — winner received funds privately.</div>}
+          {isRefunded && <div className="alert alert-warn">This bounty was refunded to the creator.</div>}
         </div>
         {busy && <div style={{ marginTop: 12, fontSize: 12, color: "var(--amber)" }}>Waiting for wallet… {busy === "fund" || busy === "claim" ? "This uses a private proof and may take up to 30 seconds." : "Confirm in your wallet."}</div>}
         {txHash && (
@@ -723,7 +736,7 @@ export default function BountyDetailPage() {
             </div>
           </div>
         )}
-        {!connectedAddr && (isCreated || isOpen || isVoting || isClaimable) && (
+        {!connectedAddr && (isCreated || isOpen || isClaimable) && (
           <div style={{ marginTop: 12, fontSize: 12, color: "var(--text-muted)", textAlign: "center" }}>
             Connect your wallet to see actions available to you.
           </div>
@@ -731,23 +744,67 @@ export default function BountyDetailPage() {
       </div>
 
       <div className="card card-pad">
-        <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Entries</h3>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Investigations</h3>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{submissions.length} {submissions.length === 1 ? "received" : "received"}</span>
+        </div>
         {submissions.length === 0 ? (
-          <div style={{ textAlign: "center", padding: 16, color: "var(--text-muted)", fontSize: 13 }}>No entries yet. Be the first to share evidence.</div>
+          <div style={{ textAlign: "center", padding: 16, color: "var(--text-muted)", fontSize: 13 }}>No investigations yet. {isCreator ? "They’ll appear here for your review." : "Be the first to share evidence."}</div>
         ) : (
-          <div style={{ display: "grid", gap: 8 }}>
-            {submissions.map((s) => (
-              <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8 }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>#{s.id} — {shortAddr(String(s.investigator))} {connectedAddr && normalizeAddr(String(s.investigator)) === normalizeAddr(connectedAddr) && <span style={{ color: "var(--accent)", fontSize: 11 }}>(you)</span>}</div>
-                  <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "Fragment Mono" }}>{String(s.evidence_hash).slice(0, 24)}…</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {submissions.map((s) => {
+              const invAddr = String(s.investigator);
+              const status = String(s.status ?? s[5] ?? "0");
+              const statusLabel = status === "1" || status === "Accepted" ? "Accepted" : status === "3" || status === "Reported" ? "Reported" : status === "4" || status === "Slashed" ? "Slashed" : "Pending";
+              const isOwn = connectedAddr && normalizeAddr(invAddr) === normalizeAddr(connectedAddr);
+              return (
+                <div key={s.id} style={{ padding: 14, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>Anonymous Investigator {anonId(invAddr)} {isOwn && <span style={{ fontSize: 11, color: "var(--accent)", border: "1px solid var(--border)", padding: "1px 6px", borderRadius: 999, marginLeft: 6 }}>you</span>}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>Submitted {s.timestamp ? new Date(Number(s.timestamp) * 1000).toLocaleDateString() : ""} • Status: {statusLabel}</div>
+                    </div>
+                    <div style={{ textAlign: "right", fontSize: 11, color: "var(--text-muted)" }}>{shortAddr(invAddr)}</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8, wordBreak: "break-all" }}>
+                    {String(s.evidence_hash).slice(0, 64)}…
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {isCreator && isOpen && (
+                      <>
+                        <button disabled={!!busy} onClick={() => selectWinner(Number(s.id))} className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12 }}>
+                          {busy === "select" && selectedSubmission === Number(s.id) ? "Selecting…" : "Select winner"}
+                        </button>
+                        <button
+                          disabled={!!busy}
+                          onClick={() => {
+                            const reason = prompt("Reason for reporting this investigation (will be recorded on-chain):");
+                            if (reason) {
+                              setReportReason(reason);
+                              report(Number(s.id));
+                            }
+                          }}
+                          className="btn btn-secondary"
+                          style={{ padding: "6px 12px", fontSize: 12 }}
+                        >
+                          Report
+                        </button>
+                      </>
+                    )}
+                    <button onClick={() => setSelectedSubmission(selectedSubmission === Number(s.id) ? null : Number(s.id))} className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12 }}>
+                      {selectedSubmission === Number(s.id) ? "Hide" : "Read investigation"}
+                    </button>
+                  </div>
+                  {selectedSubmission === Number(s.id) && (
+                    <div style={{ marginTop: 10, padding: 10, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>Evidence</div>
+                      <div style={{ wordBreak: "break-all", fontFamily: "Fragment Mono", fontSize: 11 }}>{String(s.evidence_hash)}</div>
+                      <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>Anonymous submission — investigator identity remains private. Reputation and stake were verified at submission time.</div>
+                    </div>
+                  )}
                 </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{s.votes ?? 0} votes</div>
-                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{s.timestamp ? new Date(Number(s.timestamp) * 1000).toLocaleDateString() : ""}</div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

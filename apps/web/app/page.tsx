@@ -5,13 +5,12 @@ export default function Home() {
     <div className="animate-in">
       <section className="hero">
         <h1>
-          Private payments.
+          Private bounties.
           <br />
-          Transparent truth.
+          Anonymous truth.
         </h1>
         <p>
-          Create bounties for investigations and research. Fund them privately and reward the best evidence — verified by the
-          community, paid in private.
+          Fund investigations privately and reward the best findings. Investigators build reputation without revealing who they are — creators choose the winner, payouts stay private.
         </p>
         <div className="hero-actions">
           <Link href="/create" className="btn btn-primary btn-lg">
@@ -35,22 +34,22 @@ export default function Home() {
             <div className="step">
               <div className="step-icon">◎</div>
               <h3>Fund</h3>
-              <p>Deposit securely — in-pool movement stays private</p>
+              <p>Reward locked privately via STRK20</p>
             </div>
             <div className="step">
               <div className="step-icon">⬡</div>
-              <h3>Submit</h3>
-              <p>Investigators share evidence</p>
+              <h3>Investigate</h3>
+              <p>Anonymous investigators submit findings</p>
             </div>
             <div className="step">
               <div className="step-icon">⬢</div>
-              <h3>Vote</h3>
-              <p>13 verifiers review, 7 needed to decide</p>
+              <h3>Review</h3>
+              <p>Creator reviews and selects the winner</p>
             </div>
             <div className="step">
               <div className="step-icon">✦</div>
               <h3>Reward</h3>
-              <p>Winner claims privately</p>
+              <p>Winner paid privately</p>
             </div>
           </div>
         </div>
@@ -60,27 +59,26 @@ export default function Home() {
         <div className="card card-pad">
           <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Private funding</h3>
           <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
-            Your deposit and payout move through the STRK20 privacy pool. Who you pay and how much stays private inside the
-            pool.
+            Rewards move through the STRK20 privacy pool. Who you fund and how much stays private inside the pool — not on a public market.
           </p>
         </div>
         <div className="card card-pad">
-          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Transparent progress</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Reputation without identity</h3>
           <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
-            Bounty status, submissions, and votes are public and auditable. You always know where things stand.
+            Investigators stake and build reputation anonymously. A threshold keeps spam low — good work is rewarded, bad work is slashed.
           </p>
         </div>
         <div className="card card-pad">
-          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Community verified</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Creator-controlled</h3>
           <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
-            Trusted verifiers review evidence. A submission needs 7 of 13 votes to win — no single party decides.
+            You decide what wins. Review investigations with anonymous profiles and reputation, then release the reward privately to the chosen investigator.
           </p>
         </div>
       </section>
 
       <section style={{ marginTop: 32, textAlign: "center" }}>
         <h2 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 8px" }}>Ready to get started?</h2>
-        <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 16px" }}>Connect your wallet to create and fund bounties securely.</p>
+        <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 16px" }}>Create a bounty or build reputation as an anonymous investigator.</p>
         <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
           <Link href="/bounties" className="btn btn-primary">
             Browse bounties

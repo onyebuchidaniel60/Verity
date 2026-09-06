@@ -10,19 +10,20 @@ const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
   "0": { label: "Created", cls: "badge-created" },
   "1": { label: "Funded", cls: "badge-funded" },
   "2": { label: "Open", cls: "badge-open" },
-  "3": { label: "Voting", cls: "badge-voting" },
-  "4": { label: "Winner Selected", cls: "badge-winner" },
-  "5": { label: "Claimable", cls: "badge-claimable" },
-  "6": { label: "Paid", cls: "badge-paid" },
-  "7": { label: "Refunded", cls: "badge-refunded" },
+  "3": { label: "Winner Selected", cls: "badge-winner" },
+  "4": { label: "Claimable", cls: "badge-claimable" },
+  "5": { label: "Paid", cls: "badge-paid" },
+  "6": { label: "Refunded", cls: "badge-refunded" },
   CREATED: { label: "Created", cls: "badge-created" },
   FUNDED: { label: "Funded", cls: "badge-funded" },
   OPEN: { label: "Open", cls: "badge-open" },
-  VOTING: { label: "Voting", cls: "badge-voting" },
   WINNER_SELECTED: { label: "Winner Selected", cls: "badge-winner" },
   CLAIMABLE: { label: "Claimable", cls: "badge-claimable" },
   PAID: { label: "Paid", cls: "badge-paid" },
   REFUNDED: { label: "Refunded", cls: "badge-refunded" },
+  // Backwards compat for old Sepolia bounties that used Voting
+  "VOTING": { label: "Winner Selected", cls: "badge-winner" },
+  "7": { label: "Refunded", cls: "badge-refunded" },
 };
 
 function formatReward(v: any): string {

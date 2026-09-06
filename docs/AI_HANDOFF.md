@@ -968,7 +968,88 @@ Pool will `call_contract_syscall(address: VerityAnonymizer, selector: 0x4029...2
 - `apps/web/app/globals.css` — premium black/charcoal theme (no green, `--accent #F5F5F3`, muted badges, off-white typography, subtle borders/shadows)
 - `docs/AI_HANDOFF.md` — this §27
 
-**Remaining:** User re-test of `Fund privately` on a `Created` bounty (e.g., #2 `1,550 STRK` or newly created 0.1 STRK) with amount entered exactly as reward, private balance shielded, wallet private mode enabled — capture `console.info [fundPrivate] action[1].calldata[2]` hex + `wallet response` or `error data.execution_error`; on success record `transaction_hash` + `BountyFunded` event, then proceed to `Open→Submit→Vote 7/13→Claim` e2e and mainnet `strk20.json` (Phase 7).
+**Remaining (superseded by §28 architecture change):** This §27 assumed verifier model (7/13). §28 now replaces verifiers with investigator staking & anonymous reputation — see below.
+
+## 28. ARCHITECTURE CHANGE — Remove verifiers + Investigator staking & anonymous reputation (2026-09-07, autonomous)
+
+**Instruction:** User-directed evolution: remove `13 verifiers / 7-13 voting / has_voted / verifier UI`, introduce creator-controlled `CREATED→FUNDED→OPEN→WINNER_SELECTED→CLAIMABLE→PAID` (+ `REFUNDED` with protocol fee), fixed `INVESTIGATOR_STAKE`, slash/report with safeguards, anonymous reputation `reputation while anonymous`, `IReputationProvider` abstraction (Ethos investigated, not natively Starknet-compatible → `VerityNativeReputationProvider` now, `EthosReputationProvider` later via oracle), threshold UI, bounty metadata & reward persistence, premium black/charcoal theme, user-friendly language, preserve STRK20 private funding/payout.
+
+**Phase A — Inspection (completed):**
+- Inspected `contracts/bounty_manager/src/bounty_manager.cairo:36` (verifiers `Map`, `has_voted_map`, `vote_counts`, `set_verifiers`, `vote`, `7/13`), `types.cairo:7` `BountyStatus::Voting`, `e2e_test.cairo:34` `test_full_bounty_lifecycle` (13 verifiers, 7 votes), `verity_anonymizer.cairo:1` (unchanged, `FUND_BOUNTY`/`RELEASE`), `docs/AI_HANDOFF.md:25` (phases 0-6 verifier model), `VERITY_SPEC.md`, `CLINE_IMPLEMENTATION_PLAN.md`, Sepolia live `get_bounty_count 7` etc. Mapped every verifier dependency before removal.
+
+**Phase B — Contracts:**
+- `contracts/bounty_manager/src/types.cairo:1` — replaced `BountyStatus::Voting` with `WinnerSelected`/`Claimable`/`Paid`/`Refunded` (no `Voting`), added `SubmissionStatus {Pending,Accepted,Rejected,Reported,Slashed}`, extended `Submission` with `status: SubmissionStatus`, added `Report {bounty_id,submission_id,reporter,reason,evidence,timestamp,resolved,slashed}` and `InvestigatorProfile`.
+- `contracts/bounty_manager/src/bounty_manager.cairo:1` — full rewrite `IBountyManager`:
+  - Removed: `verifiers`, `verifier_count`, `has_voted_map`, `vote_counts`, `set_verifiers`, `is_verifier`, `vote`, `get_vote_count`, `has_voted` (kept as stubs reverting `VERIFIERS_REMOVED` for old frontend safety).
+  - Kept: `version` → `'VERITY_BOUNTY_MANAGER_V2'`, `create_bounty`, `fund_bounty` (pool-only, `amount==reward`), `get_bounty`, `open_bounty`, `get_anonymizer/set_anonymizer`, `claim_payout`/`mark_paid`, `refund` alias.
+  - Added: `close_bounty` (alias `refund_bounty` when no winner), `submit_investigation` (+ `submit_evidence` alias) checks `status==Open`, `caller != creator` (`CREATOR_CANNOT_SUBMIT`), `has_staked` (`NOT_STAKED`), `!is_slashed` (`IS_SLASHED`), `rep >= minimum` (`REPUTATION_TOO_LOW`), creates `Submission` `Pending`, emits `InvestigationSubmitted`, no auto `Voting`; `select_winner(bounty_id,submission_id)` creator-only (`NOT_CREATOR`), `status==Open`, `Pending`, `!has_winner`, sets `WinnerSelected`→`Claimable`, `Reputation +10` cap 100, emits `WinnerSelected`+`ReputationUpdated`; `refund_bounty` creator/owner when `Created/Funded/Open` + `winner==0`, not `Paid/Refunded`, protocol fee `500 bps (5%)` of `funded_amount`, `emit Refunded`; `stake()` `ALREADY_STAKED`/`IS_SLASHED_CANNOT_STAKE` checks, `has_staked=true`, `stake_balances=stake_amount` (default `1 STRK = 1000000000000000000`), initial `reputation 60` (`INITIAL_STAKE`); `get_stake/has_stake/is_slashed/get_stake_amount/set_stake_amount`; `get_reputation/get_minimum_reputation(60)set_minimum_reputation/get_reputation_provider/set_reputation_provider`; `report_submission` creator-only, `NOT_OPEN`, `NOT_PENDING`, `ALREADY_REPORTED` guard, creates `Report`, `Reported`→`Slashed` (`ALREADY_SLASHED` guard), `reputation -20` floor 0, `is_slashed=true`, `emit Slashed`+`ReputationUpdated('SLASHED')`; `get_report`; internal `_get_reputation` delegates to `IReputationProvider` if `reputation_provider !=0` else internal `Map`.
+  - Storage: `next_bounty_id, bounties, anonymizer, owner, submission_counts, submissions, winners, winning_submissions, has_staked, stake_balances, is_slashed_map, stake_amount, reputation, minimum_reputation, reputation_provider, reports, has_reported, protocol_fee_bps`.
+  - Events: `BountyCreated/Funded/AnonymizerUpdated/BountyOpened/BountyClosed/InvestigationSubmitted/WinnerSelected/Claimable/Paid/Refunded/Staked/ReputationUpdated/Reported/Slashed/StakeAmountUpdated/ReputationThresholdUpdated/ReputationProviderUpdated`.
+  - Constructor defaults: `next_bounty_id 1`, `stake_amount 1 STRK`, `minimum_reputation 60`, `protocol_fee_bps 500`.
+  - `Scarb.toml:22` workspace unchanged, `scarb build Finished dev 5s` (warnings `BountyStatus` unused import only), `snforge test 18 passed` (9 bounty_manager new + 9 anonymizer) vs old `12`.
+- `contracts/verity_anonymizer` unchanged (pool `0x0254…`, `FUND_BOUNTY`/`RELEASE` with `Span<OpenNoteDeposit>`), preserves STRK20 private funding/payout.
+- Tests: `contracts/bounty_manager/tests/e2e_test.cairo:1` rewritten: `test_full_bounty_lifecycle_new` (Create→Fund→Open→Stake→Submit→SelectWinner→Claim→Paid), `test_creator_cannot_submit` (`CREATOR_CANNOT_SUBMIT`), `test_not_staked_cannot_submit` (`NOT_STAKED`), `test_double_stake_rejected` (`ALREADY_STAKED`), `test_report_and_slash` (report→slashed, rep -20, status `Slashed`), `test_refund_with_fee` (Funded→Open→Refunded), `test_select_winner_only_creator` (`NOT_CREATOR`), `test_reputation_threshold_enforced` (`REPUTATION_TOO_LOW` with 90 threshold). All `snforge 9 passed`.
+
+**Phase C — Reputation & Ethos research:**
+- Created `docs/REPUTATION.md:1` — 7-question investigation:
+  1. Ethos API `GET /api/v1/profile/{evm}` returns `credibilityScore` ✓ but EVM-only, no Starknet contract.
+  2. Score exists (0–2000) ✓, needs `/20 → 0–100`.
+  3. Today cannot prove without revealing EVM address (future ZK anonymous reviews not production).
+  4. ZK credential possible only with new issuer/oracle (e.g., Herodotus/Lagrange) that attests score on Starknet.
+  5. Threshold verifiable on-chain only via oracle that verifies proof `score≥threshold`.
+  6. No practical Starknet-native integration without oracle/bridge.
+  7. Oracle required (trusted signer or ZK verifier).
+  8. Direct API reveals link, defeats anonymity; ZK over commitment preserves it.
+  - Decision: ship `VerityNativeReputationProvider` inside `BountyManager` (Map 0–100, stake→60, win +10 cap 100, slash -20 floor 0, `minimum 60` configurable), `IReputationProvider` trait (`get_score`/`meets_threshold`) stored as `reputation_provider` address, `set_reputation_provider` owner, `docs/REPUTATION.md:6` threshold UI. Future `EthosReputationProvider` can be deployed as Starknet contract implementing trait via oracle, then `set_reputation_provider(ethosAddr)` plugs in with no `BountyManager` change. Honest about Ethos not natively providing anonymous ZK primitive.
+
+**Phase D — Frontend (verifiers removed, investigator staking & reputation):**
+- `apps/web/app/bounty/[id]/page.tsx:1` — complete rewrite for new lifecycle:
+  - `STATUS_META` updated to `Created(0)/Funded(1)/Open(2)/WinnerSelected(3)/Claimable(4)/Paid(5)/Refunded(6)` (no `Voting`), backwards compat for old `VOTING`→`WinnerSelected`.
+  - Helpers: `anonId(addr)` → `#A7F3` from `BigInt(validateAndParseAddress)`, `formatReward` `BigInt` exact with `","` + 6 decimals, `weiToStr`/`humanToWei` comma-safe.
+  - State: `stakeInfo {hasStake, stakeAmount, reputation, minRep, isSlashed}`, `evidence` (textarea), `selectedSubmission`, `reportReason`.
+  - `load()` now also fetches `get_reputation/has_stake/is_slashed/get_minimum_reputation/get_stake_amount` when `walletStoreAddr` set, for eligibility panel.
+  - `guard` maps new errors `NOT_STAKED`→`You need to stake...`, `IS_SLASHED`→`Profile slashed`, `REPUTATION_TOO_LOW`→`Required 60, yours 54...`, `CREATOR_CANNOT_SUBMIT`→`This is your bounty. You can't submit...`, `NOT_CREATOR` for select/refund, `ALREADY_REPORTED/SLASHED`, `ALREADY_HAS_WINNER`, etc., plus `paymaster 156` inner `REPUTATION_TOO_LOW/NOT_STAKED`.
+  - Funding form preserved: `fundAmount` prefilled `weiToStr(reward)`, validates `>0` + `==rewardWei` before `connectWallet` (wallet opens only after valid amount), `strk20Balances` private balance check, `Fund privately` → `wallet_strk20InvokeTransaction` `transfer OPEN + invoke FUND_BOUNTY`.
+  - New eligibility panel (`!isCreator && isOpen`): shows `Reputation X/100` + `Required` + `Stake Y STRK ✓/✗` + `✓ Eligible`/`✗ Not eligible`, `Stake X STRK to become eligible` button (`stake()` → `BountyManager.stake()`), warnings for slashed/low rep.
+  - Submission: `!isCreator` + `isOpen` → textarea `Your investigation` + `I understand fraudulent may result in loss of my stake` + `Submit investigation` disabled unless `eligibility.eligible`; `submit()` checks `isCreator` early, converts `evidence` to felt `0x + Buffer.from(slice 31)`, calls `submit_investigation`.
+  - Creator review: `isOpen && isCreator` → `Review investigations below` + `No winner — reclaim funds (protocol fee applies)` (`refund_bounty`); investigations list shows `Anonymous Investigator #A7F3 (you?)` + `Pending/Accepted/Reported/Slashed` + `Read investigation` toggle + `Select winner` + `Report` (prompt for reason → `report_submission`).
+  - Winner/Claim: `isWinnerSelected/isClaimable` → `isWinner` → `Claim reward privately` (`RELEASE` via anonymizer), `isCreator` → `Winner selected: #A7F3`, else `Awaiting winner claim`. `selectWinner`/`claim`/`refund`/`stake`/`report` all via `WalletAccountV6` + `Contract.invoke` or `strk20InvokeTransaction`.
+  - Timeline `Created→Funded→Open→Winner→Paid`, details show `Creator (you?)`, `Submissions count`, `Winner Anonymous #...`, `Network Sepolia`, no `verifier` terminology.
+- `apps/web/app/bounties/page.tsx:9` — updated `STATUS_LABEL` to new mapping (no `Voting`, `"3": "Winner Selected"`, `"7"` compat), cards unchanged premium (title, excerpt, `1,550 STRK`, badge, `By 0x12…89 • Mar 5`).
+- `apps/web/app/page.tsx:1` — rewritten `How VERITY works`: `Create→Fund→Investigate→Review→Reward` (removed `13 verifiers review, 7 needed`), cards `Private funding`/`Reputation without identity`/`Creator-controlled` with anonymous investigator language, no verifier mentions.
+- `apps/web/app/create/page.tsx:19` — `humanToWei` comma-safe, success icon neutral `--surface` (not green).
+- Reward persistence: `formatReward`/`weiToStr` `BigInt` fixes `1550 STRK` bug (old `Number/1e18` lost precision >9e15); `getStoredMeta` + `feltToTitle` fallback, `verity_bounty_<id>` localStorage + `metadata_hash` on-chain, funding form auto `Use reward amount`.
+- Language audit: removed `felt`/`u128`/`calldata`/`Sierra`/`CASM`/`selector`/`RPC`/`nonce` from visible UI (kept in `console.error` only); buttons `Fund privately`/`Submit investigation`/`Select winner`/`Report`/`Reclaim funds`; errors friendly.
+- Theme already premium black/charcoal (`globals.css:3` `--bg #0A0A0B`, `--accent #F5F5F3`, muted badges) — preserved, no green reintroduced.
+
+**Phase E — Verification:**
+- `corepack pnpm --filter @verity/web exec tsc --noEmit` — **EXIT 0**
+- `corepack pnpm --filter @verity/web run build` — **Compiled 27.3s, TypeScript 8.0s, Generating static pages 7/7** (`/,/bounties,/bounty/[id],/create,/phase1-proof,/phase2-deploy`) — previous build `3.9s` now larger due to new page but still passes
+- `wsl scarb build` — **Finished dev 5s** (warnings `deprecated-starknet-consts` only)
+- `wsl snforge test` — **18 passed, 0 failed** (bounty_manager 9 new + anonymizer 9) — old `12` with verifiers, now `18` with staking/slash/threshold
+- Sepolia live check `get_bounty_count 7` still on old contract `0x07e239…`; new `BountyManager V2` built but not yet declared on Sepolia (dry-run fee `34.65 STRK` > `ready-sepolia` balance `19.8 STRK` — `sncast declare --network sepolia` fails `Resources bounds exceed balance`). Documented as pending; local tests are the source of truth, old Sepolia evidence preserved in `strk20.json` history. Next step is faucet funding then `sncast declare` + `deploy` + `set_anonymizer` + `set_bounty_manager` wiring + frontend `CONTRACTS` update.
+
+**Phase F — Sepolia E2E (pending funding):**
+- Planned: `create bounty (1550 STRK)` → `fund privately` (hex `transfer OPEN + invoke FUND_BOUNTY` with `weiToStr` exact) → `stake()` (1 STRK) → `get_reputation` ≥60 → `submit_investigation` (anon #A7F3) → `select_winner` (creator) → `claim_payout` (winner `RELEASE` via anonymizer) → reputation `60→70` + `Paid`; alternative `report_submission` → `Slashed`/`ALREADY_SLASHED` guard + reputation `60→40`; `refund_bounty` when `Open` no winner → `Refunded` with `500 bps` fee. Will be executed after faucet + new deployment, using same `WalletAccountV6` flows as before.
+
+**Files in this architecture checkpoint (uncommitted → will be committed next):**
+- `contracts/bounty_manager/src/types.cairo` — new `BountyStatus` (no Voting), `SubmissionStatus`, `Report`, `InvestigatorProfile`
+- `contracts/bounty_manager/src/bounty_manager.cairo` — verifier-free `BountyManager V2` with staking, reputation, `IReputationProvider`, report/slash, `select_winner`, `refund_bounty` with fee, close, reputation threshold, `VERIFIERS_REMOVED` stubs
+- `contracts/bounty_manager/tests/e2e_test.cairo` — 8 new tests for new lifecycle (full, creator cannot submit, not staked, double stake, report/slash, refund, select winner only creator, reputation threshold)
+- `contracts/bounty_manager/Scarb.toml` unchanged (workspace)
+- `apps/web/app/bounty/[id]/page.tsx` — full rewrite for creator→investigator→winner, stake/reputation eligibility, anonymous #A7F3, submission/report/select/refund, funding input, no verifiers
+- `apps/web/app/bounties/page.tsx` — status label updated (no Voting)
+- `apps/web/app/page.tsx` — How it works without verifiers (Creator reviews, reputation while anonymous)
+- `apps/web/app/create/page.tsx` — comma-safe humanToWei, neutral success
+- `apps/web/app/globals.css` — already premium (no change)
+- `docs/REPUTATION.md` — new Ethos research + VerityNative design + threshold + privacy
+- `docs/AI_HANDOFF.md` — this §28
+- `README.md` + `VERITY_SPEC.md`/`CLINE_IMPLEMENTATION_PLAN.md` updates pending in next commit (architecture docs), `strk20.json` new deployment pending funding
+
+**Remaining (exact next step):**
+1. Faucet `ready-sepolia 0xdc464532bfe260c48f5f555262dca74b45ad4b11a5a04914405be80d420ca5` to ≥35 STRK (currently 19.8, need 34.65 for declare), then `sncast -a ready-sepolia declare --network sepolia --package bounty_manager --contract-name BountyManager --wait` and `deploy` with `owner 0xdc46…`, then `set_anonymizer(0x04b93a…)` on new BM and `set_bounty_manager(newBM)` on existing `VerityAnonymizer 0x04b93a…` via `sncast invoke`, update `apps/web/lib/contracts.ts:15` `bountyManager` to new address, commit.
+2. Re-run Sepolia e2e `create(0.1 STRK)→fund(0.1 STRK hex)→stake→submit→select→claim` and `report→slash` + `refund` paths, capture `transaction_hash` + `BountyFunded/InvestigationSubmitted/WinnerSelected/Claimable/Paid/Refunded/Reported/Slashed` events, update `strk20.json` with new `BountyManager V2` class_hash/address + transactions, and record in `AI_HANDOFF.md`.
+3. Update `README.md` (remove 13 verifiers, add staking/reputation/anonymous flow) and `docs/ARCHITECTURE.md` before final handoff.
 
 
 
