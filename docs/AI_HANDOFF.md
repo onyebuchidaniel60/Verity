@@ -1220,6 +1220,8 @@ OPEN → switch to investigator wallet → submit investigation → creator sees
 it → select winner → refund-path on a second bounty. Paste any failure +
 console `[fundPrivate]`/`[claim]` lines back here.
 
+**Checkpoint:** `2b93806` (pushed `main...origin/main` in sync).
+
 
 
 
