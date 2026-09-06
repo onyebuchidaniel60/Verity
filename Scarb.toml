@@ -33,6 +33,8 @@ edition = "2024_07"
 starknet = "2.17.0"
 snforge_std = "0.63.0"
 assert_macros = "2.17.0"
+openzeppelin = "3.0.0"
+privacy = { git = "https://github.com/starkware-libs/starknet-privacy.git", rev = "bc75e4bac71ad0ce10c6e63effc33b5b25131a4f" }
 
 [workspace.tool.scarb]
 allow-prebuilt-plugins = ["snforge_std"]

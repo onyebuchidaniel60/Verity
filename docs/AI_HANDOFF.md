@@ -709,4 +709,60 @@ Each hash must be a real on-chain Sepolia hash verifiable at `https://sepolia.vo
 
 **Files changed (this docs-only commit):**
 - `docs/AI_HANDOFF.md` — this §22 (no code change, `a04e528` retained as checkpoint)
+## 23. PHASE 2 MILESTONE 2.0 — VerityAnonymizer skeleton + pool-only privacy_invoke (LOCAL VERIFICATION)
+**Authorized:** 2026-09-06 — Gate 1 manually verified per user, Phase 2 authorized. Preservation: Ready X discovery, `walletV6.supportedWalletApi >=0.10.3`, Shield/Balances/Transfer/Withdraw from `a04e528` unchanged (verified `scarb build` + `tsc --noEmit` still pass).
+
+**Milestone scope (PLAN §9 / SPEC §10):** Minimal `VerityAnonymizer` boundary only — `constructor(pool)`, pool storage, pool-only auth, replay protection, operation validation, real `privacy::objects::OpenNoteDeposit`. No BountyManager, no FundBounty/ReleaseToOpenNote business logic, no frontend change. Gate 2 NOT yet proven (requires Sepolia wallet-signed `privacy_invoke` in Milestone 2.1).
+
+**1. Installed privacy package verification (before code):**
+- Toolchain pinned: `Scarb 2.20.1`, `snforge 0.63.0`, `Cairo 2024_07`, `starknet 2.17.0`, `snforge_std 0.63.0` — matches `docs/STRK20_INTEGRATION.md:3` and `starkware-libs/starknet-privacy` workspace at `bc75e4b` (`Scarb.toml` workspace members `privacy`/`ekubo`/`shadow`/`vesu`, edition `2024_07`, corelib `2.17.0`).
+- `scarb list privacy` → `package not found in registry: privacy *` at `scarbs.xyz` — confirms `privacy` is not a registry package, must be git. Cloned `https://github.com/starkware-libs/starknet-privacy` at `bc75e4b` (latest `main` at 2026-09-06), inspected `packages/privacy/src/objects.cairo:129` — real `struct OpenNoteDeposit { note_id: felt252, token: ContractAddress, amount: u128 }` with `#[derive(Serde, Copy, Drop, PartialEq, Debug)]`; `packages/privacy/src/utils.cairo:84` — `INVOKE_SELECTOR = selector!("privacy_invoke")` and `STRK_TOKEN_ADDRESS = 0x04718f...` same as `apps/web/lib/strk20.ts`; `packages/privacy/src/privacy.cairo:29,882,1040` — `OpenNoteDeposit` returned via `Span<OpenNoteDeposit>` from anonymizer's `privacy_invoke` and `_deposit_to_open_note` validates it — empty `Span` is valid when `undeposited_open_notes == 0` (verified in `privacy.cairo:880-950`).
+- Comparison: `docs/STRK20_INTEGRATION.md:8/18` (“import `privacy::objects::OpenNoteDeposit`, return `Span<OpenNoteDeposit>`, `INVOKE_SELECTOR` from pool”) matches installed `privacy` at `bc75e4b` — no invented ABI.
+
+**2. Implementation (smallest, protocol-accurate):**
+- `Scarb.toml:32-36` — added workspace deps `openzeppelin = "3.0.0"` and `privacy = { git = "https://github.com/starkware-libs/starknet-privacy.git", rev = "bc75e4bac71ad0ce10c6e63effc33b5b25131a4f" }` (pinned rev, not branch). `contracts/verity_anonymizer/Scarb.toml:9-11` — depends on `starknet`, `openzeppelin`, `privacy`.
+- `contracts/verity_anonymizer/src/verity_anonymizer.cairo:1-72` — replaced Phase 0 `version()` scaffold with Milestone 2.0 proof boundary:
+  - `pub const ALLOWED_OP_PROOF = 'VERITY_PROOF'` (only operation accepted at this milestone)
+  - `#[starknet::interface] pub trait IVerityAnonymizer<T>` now exposes `version()`, `get_pool()`, and `privacy_invoke(ref self: T, operation: felt252, nonce: felt252, note_id: felt252) -> Span<OpenNoteDeposit>` — selector is `privacy_invoke` = `INVOKE_SELECTOR`, return type is the real `privacy::objects::OpenNoteDeposit` span (not a mirror).
+  - `Storage { pool: ContractAddress, used_nonces: Map<felt252, bool> }`, `constructor(pool)` asserts `POOL_ZERO` if zero.
+  - `privacy_invoke` steps: `get_caller_address() == pool` else `NOT_POOL`; `operation == ALLOWED_OP_PROOF` else `INVALID_OP`; `nonce.is_non_zero()` else `NONCE_ZERO`; `used_nonces[nonce]` else `REPLAY`; mark used; if `note_id.is_non_zero()`, append `OpenNoteDeposit { note_id, token: STRK_TOKEN_ADDRESS, amount: 1 }` else return empty `Span` — both paths use the real `privacy` type, empty is valid per `privacy.cairo:880` when no open notes were created.
+  - Imports: `core::num::traits::Zero` for `is_non_zero`, `privacy::objects::OpenNoteDeposit`, `privacy::utils::constants::STRK_TOKEN_ADDRESS`. No BountyManager code, no voting, no frontend edit, no dependency version bump beyond the required `privacy` git pin.
+
+**3. Tests (8 new + 1 existing, all local, NOT Gate 2):**
+- Added `contracts/verity_anonymizer/tests/anonymizer_test.cairo:1-85` (integration tests, `snforge`):
+  - `test_pool_caller_accepted` — pool caller, `ALLOWED_OP_PROOF`, fresh nonce, `note_id 0` → empty `Span` ✓
+  - `test_pool_caller_returns_deposit_when_note_id_nonzero` — same but `note_id 0xabc` → `Span len 1`, `note_id`, `amount 1`, `token.non_zero()` ✓ (proves real type flows)
+  - `test_non_pool_caller_rejected` — `#[should_panic(expected: 'NOT_POOL')]` with `other_address` ✓
+  - `test_replay_protection_rejects_second_use_of_nonce` — same nonce twice → `REPLAY` ✓
+  - `test_invalid_operation_rejected` — `'WRONG_OP'` → `INVALID_OP` ✓
+  - `test_zero_nonce_rejected` — `0` → `NONCE_ZERO` ✓
+  - `test_get_pool_and_version` — checks `version == 'VERITY_ANONYMIZER_V0'` and `get_pool == pool` ✓
+  - `test_real_open_note_deposit_type_compiles` — direct `OpenNoteDeposit { note_id: 0x42, token, amount: 100 }` construction ✓
+  - Kept `scaffold_test::foundation_assert_works` ✓
+
+**4. Verification (local, distinguish from on-chain):**
+- `wsl -d Ubuntu-24.04 -- bash -lc 'scarb build'` — **Finished `dev` in 4s** (2.20.1, warnings only for `allow-prebuilt-plugins` profile overrides, no errors). Previous 2 warnings about `is_non_zero` fixed via `Zero` import.
+- `wsl -d Ubuntu-24.04 -- bash -lc 'snforge test'` — **10 passed, 0 failed** (`bounty_manager: 1`, `verity_anonymizer: 9` — `anonymizer_test::test_*` 8 + `scaffold_test` 1). Output: `test_pool_caller_accepted (l2_gas ~1447530)`, `test_pool_caller_returns_deposit... (~1457660)`, `test_non_pool_rejected (~1013460)`, `test_replay... (~1672510)`, `test_invalid_operation... (~1013460)`, `test_zero_nonce... (~1013460)`, `test_get_pool_and_version (~870160)`, `test_real_open_note_deposit_type... (~14020)` — all PASS.
+- `corepack pnpm --filter @verity/web exec tsc --noEmit` — **EXIT 0**
+- `corepack pnpm --filter @verity/web run build` — **Compiled 8.4s, TypeScript 4.3s, 4/4 pages**, `○ /phase1-proof` — Phase 1 harness preserved (no frontend edit).
+- `git diff --stat` pre-commit: `Scarb.lock` (+157, openzeppelin+privacy+starkware_utils), `Scarb.toml` (+2), `contracts/verity_anonymizer/Scarb.toml` (+6/-1), `contracts/verity_anonymizer/src/verity_anonymizer.cairo` (+115/-29), new `anonymizer_test.cairo`. No frontend change, no `next-env.d.ts` in staged set (restored).
+
+**5. What remains for Milestone 2.1 (Gate 2 on-chain proof):**
+- Deploy `VerityAnonymizer` to Sepolia with the real pool address `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91` as constructor arg.
+- Wallet-signed `wallet_strk20InvokeTransaction` with an `invoke` action targeting it (e.g. a `transfer` with `OPEN` + `invoke` with `note_id` placeholder, or a minimal invoke with no open note) — the pool must call `privacy_invoke` and return the real `OpenNoteDeposit` span.
+- Capture: pool address, anonymizer address, `privacy_invoke` selector evidence, transaction hash, receipt status, `VERITY contract reached` proof (event or storage read). No FundBounty yet — that is Phase 3.
+- This will require your Ready X Sepolia signing, as with Phase 1. Agent will stop and request it.
+
+**6. Gate status:**
+- **Gate 1:** Considered verified per user authorization (individual Shield/Balances/Transfer/Withdraw at `a04e528`), but this milestone does not re-prove it — local build/tests are retrospective, not new on-chain Gate 1 evidence. Keeping `071267a` as Gate 1 boundary, but noting `STRK20` still works via preserved harness.
+- **Gate 2:** **NOT YET PASSED** — local `scarb build` + `snforge test` are *local verification only*. Real Sepolia `privacy_invoke` from pool (Milestone 2.1) is still required. No `privacy_invoke` on-chain evidence yet.
+- **Phase 3/4:** Not started, not authorized beyond 2.0.
+
+**Files in this milestone (staged):**
+- `Scarb.toml` — add `openzeppelin`/`privacy` workspace deps (pinned `bc75e4b`)
+- `Scarb.lock` — expanded with `openzeppelin` 3.0.0 + `privacy` + `starkware_utils`/`ekubo` git deps (no version bump of `starknet`/`snforge`)
+- `contracts/verity_anonymizer/Scarb.toml` — add `privacy`/`openzeppelin` deps
+- `contracts/verity_anonymizer/src/verity_anonymizer.cairo` — Milestone 2.0 boundary
+- `contracts/verity_anonymizer/tests/anonymizer_test.cairo` — 8 new tests
+- `docs/AI_HANDOFF.md` — this §23
 

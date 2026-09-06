@@ -7,10 +7,8 @@ edition.workspace = true
 
 [dependencies]
 starknet.workspace = true
-
-# The official `privacy` Cairo package (starkware-libs/starknet-privacy) that
-# defines privacy::objects::OpenNoteDeposit is added in Phase 2 together with
-# the privacy_invoke entrypoint, pinned to the same tag as the live pool.
+openzeppelin.workspace = true
+privacy.workspace = true
 
 [dev-dependencies]
 snforge_std.workspace = true
