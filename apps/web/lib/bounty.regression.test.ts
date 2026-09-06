@@ -24,6 +24,10 @@ import {
   isCreatedStatus,
   isFundedStatus,
   isOpenStatus,
+  normalizeAddrLower,
+  toHexAddress,
+  statusMeta,
+  getSubmissionStatusName,
 } from "./bounty-pure.ts";
 
 describe("Bug 1 — exact reward conversion (BigInt, never Number/1e18)", () => {
@@ -153,5 +157,96 @@ describe("Bug 3 — submission gating (current stage, before private staking)", 
   it("empty evidence blocked, disconnected blocked", () => {
     assert.equal(canSubmitInvestigation({ status: "Open", creator, connectedAddr: investigator, evidence: "  " }).reason, "EMPTY_EVIDENCE");
     assert.equal(canSubmitInvestigation({ status: "Open", creator, connectedAddr: null, evidence: "x" }).reason, "NOT_CONNECTED");
+  });
+});
+
+describe("Bug 1 (ownership) — on-chain decimal felt vs wallet 0x-hex", () => {
+  // starknet.js returns ContractAddress fields as DECIMAL strings
+  // (Sepolia V2 bounty #5 creator), while wallets return 0x-hex.
+  const creatorDecimal = "389191342076391126826946130899986783973721101849864196251820451601448045733";
+  const creatorHex = toHexAddress(creatorDecimal)!;
+  const creatorHexUpper = creatorHex.toUpperCase().replace("0X", "0x");
+
+  it("toHexAddress canonicalizes decimal felt to 0x-hex", () => {
+    assert.ok(creatorHex.startsWith("0x"));
+    assert.equal(creatorHex.length, 66);
+    assert.equal(BigInt(creatorHex).toString(), creatorDecimal);
+  });
+
+  it("normalizeAddrLower matches decimal felt against 0x-hex wallet address", () => {
+    assert.equal(normalizeAddrLower(creatorDecimal), normalizeAddrLower(creatorHex));
+    assert.equal(normalizeAddrLower(creatorHexUpper), normalizeAddrLower(creatorHex));
+  });
+
+  it("isCreator true when wallet A (hex) created the bounty (decimal on-chain)", () => {
+    assert.ok(isCreator(creatorDecimal, creatorHex));
+    assert.ok(isCreator(creatorHex, creatorDecimal));
+    assert.ok(!isCreator(creatorDecimal, "0x025c19aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    assert.ok(!isCreator(creatorDecimal, null));
+  });
+
+  it("creator submitting own bounty blocked even across representations", () => {
+    const r = canSubmitInvestigation({ status: "Open", creator: creatorDecimal, connectedAddr: creatorHex, evidence: "x" });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, "IS_CREATOR");
+    const r2 = canSubmitInvestigation({ status: "Open", creator: creatorDecimal, connectedAddr: "0x025c19aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidence: "x" });
+    assert.equal(r2.ok, true);
+  });
+});
+
+describe("Reported scenario — wallet A creates, views as A vs B", () => {
+  // Real Sepolia V2 bounty #5 shape: creator decimal felt, status Created.
+  const onChainCreator = "389191342076391126826946130899986783973721101849864196251820451601448045733";
+  const walletA = toHexAddress(onChainCreator)!; // the creator's wallet
+  const walletB = "0x025c19aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const status = getStatusName({ variant: { Created: {} } });
+
+  it("TEST A: creator + CREATED badge, never Funded", () => {
+    assert.equal(status, "Created");
+    assert.equal(statusMeta(status).label, "Created");
+    assert.notEqual(statusMeta(status).label, "Funded");
+  });
+  it("TEST B: wallet A connected → isCreator, sees Fund privately", () => {
+    assert.ok(isCreator(onChainCreator, walletA));
+    const showFundForm = isCreatedStatus(status) && isCreator(onChainCreator, walletA);
+    const showAwaitingMsg = isCreatedStatus(status) && !!walletA && !isCreator(onChainCreator, walletA);
+    assert.ok(showFundForm);
+    assert.ok(!showAwaitingMsg);
+  });
+  it("TEST C: wallet B connected → not creator, cannot fund, sees awaiting message", () => {
+    assert.ok(!isCreator(onChainCreator, walletB));
+    const showFundForm = isCreatedStatus(status) && isCreator(onChainCreator, walletB);
+    const showAwaitingMsg = isCreatedStatus(status) && !!walletB && !isCreator(onChainCreator, walletB);
+    assert.ok(!showFundForm);
+    assert.ok(showAwaitingMsg);
+  });
+  it("disconnected → neither creator UI nor non-creator verdict", () => {
+    assert.ok(!isCreator(onChainCreator, null));
+    const showAwaitingMsg = isCreatedStatus(status) && !!null && !isCreator(onChainCreator, null);
+    assert.ok(!showAwaitingMsg); // must show Connect prompt instead
+  });
+});
+
+describe("Bug 2 — badge strictly follows chain status (CREATED never Funded)", () => {
+  it("every canonical status maps to its own label", () => {
+    assert.equal(statusMeta("Created").label, "Created");
+    assert.equal(statusMeta("Funded").label, "Funded");
+    assert.equal(statusMeta("Open").label, "Open");
+    assert.equal(statusMeta("WinnerSelected").label, "Winner Selected");
+    assert.equal(statusMeta("Claimable").label, "Claimable");
+    assert.equal(statusMeta("Paid").label, "Paid");
+    assert.equal(statusMeta("Refunded").label, "Refunded");
+  });
+  it("CREATED representations never render Funded", () => {
+    for (const s of ["Created", "CREATED", "created", "0", 0, { variant: { Created: {} } }]) {
+      assert.equal(statusMeta(s as any).label, "Created");
+    }
+  });
+  it("submission statuses parse from enum and numeric shapes", () => {
+    assert.equal(getSubmissionStatusName({ variant: { Accepted: {} } }), "Accepted");
+    assert.equal(getSubmissionStatusName({ variant: { Reported: {} } }), "Reported");
+    assert.equal(getSubmissionStatusName({ variant: { Slashed: {} } }), "Slashed");
+    assert.equal(getSubmissionStatusName("1"), "Accepted");
+    assert.equal(getSubmissionStatusName("Pending"), "Pending");
   });
 });

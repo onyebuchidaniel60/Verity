@@ -1222,6 +1222,68 @@ console `[fundPrivate]`/`[claim]` lines back here.
 
 **Checkpoint:** `2b93806` (pushed `main...origin/main` in sync).
 
+## 30. OWNERSHIP/STATUS FIX — creator misidentified + Funded badge (2026-09-07, Muse Spark)
+
+**Reported:** wallet A creates a bounty, views it as wallet A, but sees the
+non-creator message ("Only the creator can fund…"); a just-created bounty
+shows a `Funded` tag.
+
+**End-to-end trace (no guessing), per the 10 requested checkpoints:**
+
+1. `create_bounty` records `creator = get_caller_address()` (contract, unchanged). ✓
+2. `get_bounty` returns the struct incl. `creator`. ✓
+3. `WalletAccountV6`/`requestAccounts` returns the account as **0x-hex**. ✓
+4. Frontend connected address comes from the zustand store (header picker)
+   mirrored to local `connectedAddr`; action handlers use `connectWallet()`
+   directly. **Gap found:** the detail page never wrote the store, and the
+   store is in-memory (lost on reload; never set by the create page) — so
+   `connectedAddr` is often null even with the extension connected.
+5. Comparison was `isCreatorAddr(onChainCreator, connectedAddr)`. ✓ path.
+6. **Root cause #1 (definite):** `normalizeAddrLower` canonicalized only
+   `0x`-hex. starknet.js returns ContractAddress fields as **decimal felt
+   strings** (proven: Sepolia V2 bounty creator
+   `"38919134…5733"`), so decimal-vs-hex never matched → `isCreator`
+   always false for real data. (Regression from §29: the old local
+   `normalizeAddr` used `validateAndParseAddress`, which accepts decimal.)
+7. **Root cause #2:** comparison runs with `connectedAddr = null` before any
+   wallet init (see #4) → non-creator UI by default.
+8. Stale state: localStorage holds only title/description (reward/status/
+   creator always re-read from chain per `load()`); the in-memory store loss
+   on reload is the real staleness vector (covered by #4's fix).
+9. `validateAndParseAddress`/BigInt/casing now unified: `normalizeAddrLower`
+   canonicalizes ANY felt via `BigInt(s) → 0x+64hex lowercase`.
+10. Same V2 deployment everywhere: `CONTRACTS.bountyManager =
+    0x03643a…` used by create + detail + list; no address skew.
+
+**Fix (frontend only, reward handling untouched):**
+
+- `lib/bounty-pure.ts`: `normalizeAddrLower` BigInt-canonical (decimal +
+  hex); new `toHexAddress` display helper; new `statusMeta()` — badge
+  derived STRICTLY from canonical chain status (CREATED can never render
+  Funded); `getSubmissionStatusName` now parses CairoCustomEnum + numeric
+  (`{variant:{Accepted:{}}}` previously stringified to "[object Object]" →
+  always "Pending", which also wrongly kept Select/Report buttons visible).
+- `app/bounty/[id]/page.tsx`: badge via `statusMeta()` (map deleted);
+  `ensureConnected` syncs the shared store; explicit **Connect wallet**
+  button when disconnected; non-creator verdicts gated on `connectedAddr`
+  (disconnected shows the Connect prompt, never "awaiting creator");
+  creator/investigator displays via canonical hex; submission status via
+  `getSubmissionStatusName`; temporary `[bounty-diag]` console logs
+  (bountyId, contract, on-chain creator + hex, on-chain status, connected
+  addr, computed `isCreator`) — remove after manual verification.
+- Regression tests: 31 pass, incl. new decimal-vs-hex ownership suite and a
+  TEST A/B/C/D simulation with real on-chain #5 values (creator badge,
+  wallet-A fund form, wallet-B awaiting message, disconnected neutral).
+
+**Verification:** `node --test` **31 pass**; `tsc` 0; `next build` 7/7;
+`snforge` **21 pass**. Logic-level TEST A–C verified against real on-chain
+shapes; TEST D–F (fund→FUNDED, open→OPEN, eligible submit) require wallet
+signing and remain user-verified (see §29.1).
+
+**Files changed:** `apps/web/lib/bounty-pure.ts`,
+`apps/web/app/bounty/[id]/page.tsx`,
+`apps/web/lib/bounty.regression.test.ts`, `docs/AI_HANDOFF.md` (this §30).
+
 
 
 

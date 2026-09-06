@@ -177,18 +177,44 @@ export function validateFundingAmount(enteredHuman: string, onChainRewardWei: bi
 export function normalizeAddrLower(a: string | null | undefined): string | null {
   if (!a) return null;
   try {
-    const s = String(a).trim().toLowerCase();
+    const s = String(a).trim();
     if (!s) return null;
-    // Compare zero addresses across representations
-    if (s === "0x0" || s === "0" || s === "0x" + "0".repeat(64)) return "0x0";
-    // Pad short hex for stable comparison
-    if (/^0x[0-9a-f]+$/.test(s)) {
-      const hex = s.slice(2).padStart(64, "0");
-      return ("0x" + hex).toLowerCase();
-    }
-    return s;
+    // Canonicalize ANY felt representation — 0x-hex (any case/padding) OR
+    // decimal (this is what starknet.js returns for ContractAddress fields:
+    // e.g. creator "38919134...") — via BigInt to 0x + 64 hex lowercase.
+    // A naive 0x-only comparison NEVER matches on-chain decimal strings,
+    // which misclassifies the creator as a non-creator.
+    const hex = BigInt(s).toString(16).padStart(64, "0");
+    if (hex === "0".repeat(64)) return "0x0";
+    return ("0x" + hex).toLowerCase();
   } catch {
-    return String(a).toLowerCase();
+    try {
+      const f = String(a).trim().toLowerCase();
+      return f || null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Canonical 0x-hex display for any felt (decimal or hex). Null when unparseable. */
+export function toHexAddress(a: string | null | undefined): string | null {
+  const n = normalizeAddrLower(a);
+  if (!n || n === "0x0") return n;
+  return n;
+}
+
+// Single source of truth for the status badge: derived STRICTLY from the
+// canonical chain status name. CREATED can never render "Funded" here —
+export function statusMeta(s: BountyStatusName | string | number): { label: string; cls: string; desc: string } {
+  switch (getStatusName(s as any)) {
+    case "Created": return { label: "Created", cls: "badge-created", desc: "Awaiting funding" };
+    case "Funded": return { label: "Funded", cls: "badge-funded", desc: "Ready to open" };
+    case "Open": return { label: "Open", cls: "badge-open", desc: "Accepting investigations" };
+    case "WinnerSelected": return { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" };
+    case "Claimable": return { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" };
+    case "Paid": return { label: "Paid", cls: "badge-paid", desc: "Completed" };
+    case "Refunded": return { label: "Refunded", cls: "badge-refunded", desc: "Refunded" };
   }
 }
 
@@ -230,16 +256,37 @@ export function isCreator(creator: string | null | undefined, connectedAddr: str
 }
 
 export function getSubmissionStatusName(status: any): string {
-  if (!status) return "Pending";
-  if (typeof status === "string") return status;
+  if (!status && status !== 0) return "Pending";
+  if (typeof status === "string" || typeof status === "number" || typeof status === "bigint") {
+    const t = String(status).trim().toLowerCase();
+    const map: Record<string, string> = {
+      "0": "Pending", pending: "Pending",
+      "1": "Accepted", accepted: "Accepted",
+      "2": "Rejected", rejected: "Rejected",
+      "3": "Reported", reported: "Reported",
+      "4": "Slashed", slashed: "Slashed",
+    };
+    if (map[t]) return map[t];
+    return String(status);
+  }
   if (typeof status === "object" && status.variant) {
     const variant = status.variant as Record<string, any>;
     const key = Object.keys(variant).find(k => variant[k] !== undefined);
-    return key || "Pending";
+    if (key) {
+      const t = key.trim().toLowerCase();
+      const map: Record<string, string> = { pending: "Pending", accepted: "Accepted", rejected: "Rejected", reported: "Reported", slashed: "Slashed" };
+      return map[t] || key;
+    }
+    return "Pending";
   }
   if (typeof status === "object") {
     const keys = Object.keys(status);
     for (const k of keys) if (["Pending","Accepted","Rejected","Reported","Slashed"].includes(k)) return k;
+    for (const k of keys) {
+      const t = k.trim().toLowerCase();
+      const map: Record<string, string> = { pending: "Pending", accepted: "Accepted", rejected: "Rejected", reported: "Reported", slashed: "Slashed" };
+      if (map[t]) return map[t];
+    }
   }
   return String(status);
 }

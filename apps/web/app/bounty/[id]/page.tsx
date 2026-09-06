@@ -9,35 +9,16 @@ import { createProvider, VERITY_NETWORKS } from "@/lib/starknet";
 import { CONTRACTS } from "@/lib/contracts";
 import { STRK20 } from "@/lib/strk20";
 import { useWalletStore } from "@/store/wallet";
-import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus } from "@/lib/bounty";
+import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus, statusMeta, toHexAddress, getSubmissionStatusName } from "@/lib/bounty";
 
 const NETWORK = "sepolia" as const;
 const POOL = STRK20[NETWORK].poolAddress as Address;
 
-// New lifecycle: Created(0) → Funded(1) → Open(2) → WinnerSelected(3) → Claimable(4) → Paid(5) → Refunded(6)
-// Keys cover numeric, PascalCase (canonical from getStatusName), and legacy uppercase.
-const STATUS_META: Record<string, { label: string; cls: string; desc: string }> = {
-  "0": { label: "Created", cls: "badge-created", desc: "Waiting to be funded" },
-  "1": { label: "Funded", cls: "badge-funded", desc: "Ready to open" },
-  "2": { label: "Open", cls: "badge-open", desc: "Accepting investigations" },
-  "3": { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
-  "4": { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
-  "5": { label: "Paid", cls: "badge-paid", desc: "Completed" },
-  "6": { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
-  Created: { label: "Created", cls: "badge-created", desc: "Waiting to be funded" },
-  Funded: { label: "Funded", cls: "badge-funded", desc: "Ready to open" },
-  Open: { label: "Open", cls: "badge-open", desc: "Accepting investigations" },
-  WinnerSelected: { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
-  Claimable: { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
-  Paid: { label: "Paid", cls: "badge-paid", desc: "Completed" },
-  Refunded: { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
-  // Backwards compat for old Sepolia bounties that used Voting (3) etc.
-  "VOTING": { label: "Voting", cls: "badge-voting", desc: "Under review" },
-  "WINNER_SELECTED": { label: "Winner Selected", cls: "badge-winner", desc: "Winner chosen" },
-  "CLAIMABLE": { label: "Claimable", cls: "badge-claimable", desc: "Ready to release" },
-  "PAID": { label: "Paid", cls: "badge-paid", desc: "Completed" },
-  "REFUNDED": { label: "Refunded", cls: "badge-refunded", desc: "Refunded" },
-};
+// Bounty lifecycle: Created(0) → Funded(1) → Open(2) → WinnerSelected(3) →
+// Claimable(4) → Paid(5) → Refunded(6). The badge is derived STRICTLY from the
+// canonical chain status via statusMeta() (@/lib/bounty-pure, unit-tested) —
+// never from reward amounts, localStorage, or optimistic UI. Legacy numeric /
+// UPPERCASE / VOTING shapes are tolerated by getStatusName.
 
 function shortAddr(a: string) {
   return a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "";
@@ -93,6 +74,7 @@ export default function BountyDetailPage() {
 
   const walletStoreAddr = useWalletStore((s) => s.address);
   const walletConnected = useWalletStore((s) => s.connected);
+  const setWalletConnection = useWalletStore((s) => s.setConnection);
 
   const provider = createProvider(NETWORK);
   // Use full ABI for V2 (bounty_manager::types::Bounty) — minimal "Bounty" fails for V2 (returns only id)
@@ -128,6 +110,16 @@ export default function BountyDetailPage() {
     try {
       const vm = await loadBounty(provider, id);
       setBounty(vm as any);
+      // TEMP-DIAG: authoritative on-chain values straight from the contract.
+      try {
+        console.info("[bounty-diag] loaded", {
+          bountyId: id,
+          contract: CONTRACTS.bountyManager,
+          onChainCreator: vm.creator,
+          onChainStatus: vm.status,
+          onChainRewardWei: vm.rewardWei.toString(),
+        });
+      } catch {}
       const rewardWei = (vm as any).rewardWei ?? 0;
       if (rewardWei !== undefined && rewardWei !== 0n) {
         const rewardStr = weiToStr(rewardWei);
@@ -221,10 +213,49 @@ export default function BountyDetailPage() {
 
   async function ensureConnected(): Promise<string> {
     if (connectedAddr && walletConnected) return connectedAddr;
-    const { address } = await connectWallet();
+    const { address, walletName } = await connectWallet();
     setConnectedAddr(address);
+    // Sync the shared store: the create page and action handlers connect via
+    // discovery directly (never touching the header picker), and the store is
+    // in-memory (lost on reload). Without this, the detail page sees a null
+    // connected address and misclassifies the creator as a non-creator.
+    try {
+      setWalletConnection(address, walletName ?? "Wallet", undefined);
+    } catch {}
     return address;
   }
+
+  async function handleConnectClick() {
+    setBusy("connect");
+    setError(null);
+    try {
+      await ensureConnected();
+      await load();
+    } catch (e: any) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // TEMP-DIAG (keep until Bug 1/2 manually verified, then remove): log the
+  // exact inputs of the creator comparison so a misclassification can be
+  // diagnosed from the console without guessing.
+  useEffect(() => {
+    try {
+      const b: any = bounty;
+      console.info("[bounty-diag]", {
+        bountyId: id,
+        contract: CONTRACTS.bountyManager,
+        onChainCreator: b?.creator ?? null,
+        onChainCreatorHex: toHexAddress(b?.creator != null ? String(b.creator) : null),
+        onChainStatus: b?.status ?? null,
+        connectedAddr,
+        walletStoreAddr,
+        isCreator: b ? isCreatorAddr(String(b.creator ?? ""), connectedAddr) : false,
+      });
+    } catch {}
+  }, [bounty, connectedAddr, walletStoreAddr, id]);
 
   async function guard(key: string, fn: () => Promise<string | void>) {
     setBusy(key);
@@ -526,10 +557,11 @@ export default function BountyDetailPage() {
   }
 
   // Authoritative chain state: status is canonical PascalCase from loadBounty;
-  // getStatusName tolerates numeric/uppercase legacy shapes too.
+  // getStatusName tolerates numeric/uppercase legacy shapes too. The badge
+  // comes strictly from statusMeta(statusName) — CREATED can never show Funded.
   const statusName = getStatusName((bounty as any)?.status ?? "Created");
   const statusKey = statusName;
-  const meta = STATUS_META[statusKey] ?? STATUS_META[String((bounty as any)?.status ?? "Created")] ?? { label: statusKey, cls: "badge-created", desc: "" };
+  const meta = statusMeta(statusName);
   // On-chain reward is authoritative — never localStorage, never a fallback constant.
   const rewardWei = getRewardWei(bounty);
   const rewardStr = formatRewardWei(rewardWei);
@@ -551,6 +583,9 @@ export default function BountyDetailPage() {
   const isRefunded = isRefundedStatus(statusName);
   const creatorAddr = String((bounty as any)?.creator ?? "");
   const winnerAddr = String((bounty as any)?.winner ?? "");
+  // Canonical hex for display/comparison: on-chain addresses arrive as decimal
+  // felt strings, wallet addresses as 0x-hex. toHexAddress unifies both.
+  const creatorHex = toHexAddress(creatorAddr) ?? creatorAddr;
   const normCreator = normalizeAddr(creatorAddr);
   const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
   const normWinner = normalizeAddr(winnerAddr);
@@ -613,7 +648,7 @@ export default function BountyDetailPage() {
           <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
               <span style={{ color: "var(--text-muted)" }}>Creator</span>
-              <span style={{ fontFamily: "Fragment Mono", fontSize: 12 }}>{shortAddr(creatorAddr)} {isCreator && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
+              <span style={{ fontFamily: "Fragment Mono", fontSize: 12 }}>{shortAddr(creatorHex)} {isCreator && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "var(--text-muted)" }}>Created</span>
@@ -703,6 +738,14 @@ export default function BountyDetailPage() {
         </p>
 
         <div style={{ display: "grid", gap: 10 }}>
+          {!connectedAddr && (
+            <div style={{ display: "grid", gap: 8, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
+              <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>Connect your wallet to see the actions available to you.</div>
+              <button disabled={!!busy} onClick={handleConnectClick} className="btn btn-secondary">
+                {busy === "connect" ? "Connecting…" : "Connect wallet"}
+              </button>
+            </div>
+          )}
           {isCreated && isCreator && (
             <div style={{ display: "grid", gap: 10, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>Fund this bounty</div>
@@ -736,7 +779,7 @@ export default function BountyDetailPage() {
               <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>Your wallet will open only when you click Fund privately. Status becomes FUNDED only after the transaction is confirmed.</p>
             </div>
           )}
-          {isCreated && !isCreator && (
+          {isCreated && connectedAddr && !isCreator && (
             <div className="alert alert-warn" style={{ margin: 0 }}>
               <span>◈</span>
               <div><strong>Status: CREATED — awaiting creator funding</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Only the creator can fund this bounty. Check back after it is funded and opened.</div></div>
@@ -747,7 +790,7 @@ export default function BountyDetailPage() {
               {busy === "open" ? "Processing…" : "Open bounty"}
             </button>
           )}
-          {isFunded && !isCreator && (
+          {isFunded && !isCreator && connectedAddr && (
             <div className="alert alert-warn" style={{ margin: 0 }}>
               <span>◈</span>
               <div><strong>Bounty funded — awaiting creator to open</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Investigations open after the creator opens the bounty.</div></div>
@@ -834,8 +877,8 @@ export default function BountyDetailPage() {
           <div style={{ display: "grid", gap: 10 }}>
             {submissions.map((s) => {
               const invAddr = String(s.investigator);
-              const status = String(s.status ?? s[5] ?? "0");
-              const statusLabel = status === "1" || status === "Accepted" ? "Accepted" : status === "3" || status === "Reported" ? "Reported" : status === "4" || status === "Slashed" ? "Slashed" : "Pending";
+              const invHex = toHexAddress(invAddr) ?? invAddr;
+              const statusLabel = getSubmissionStatusName(s.status ?? s[5] ?? "Pending");
               const isOwn = connectedAddr && normalizeAddr(invAddr) === normalizeAddr(connectedAddr);
               return (
                 <div key={s.id} style={{ padding: 14, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10 }}>
@@ -844,7 +887,7 @@ export default function BountyDetailPage() {
                       <div style={{ fontSize: 13, fontWeight: 600 }}>Anonymous Investigator {anonId(invAddr)} {isOwn && <span style={{ fontSize: 11, color: "var(--accent)", border: "1px solid var(--border)", padding: "1px 6px", borderRadius: 999, marginLeft: 6 }}>you</span>}</div>
                       <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>Submitted {s.timestamp ? new Date(Number(s.timestamp) * 1000).toLocaleDateString() : ""} • Status: {statusLabel}</div>
                     </div>
-                    <div style={{ textAlign: "right", fontSize: 11, color: "var(--text-muted)" }}>{shortAddr(invAddr)}</div>
+                    <div style={{ textAlign: "right", fontSize: 11, color: "var(--text-muted)" }}>{shortAddr(invHex)}</div>
                   </div>
                   <div style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8, wordBreak: "break-all" }}>
                     {String(s.evidence_hash).slice(0, 64)}…
