@@ -620,4 +620,52 @@ Checklist (Q1–Q11):
 - Gate 1 = **NO** (no real wallet-signed STRK20 operation has succeeded on Sepolia yet — registration prerequisite, not code defect).
 - Phase 2 = **NOT AUTHORIZED**.
 - pnpm symlink repair was required (see §20.4) — not a dependency upgrade.
+## 21. Run full flow orchestration fix (2026-09-06) — stops after Shield
+**Trigger:** User reported after §20 fix: individual buttons Shield/Balances/Transfer/Withdraw all work, but `Run full flow` performs only Shield and stops. No underlying STRK20 operation was changed — individual operations are the source of truth per instruction.
+
+**Diagnosis (read-only, before edit):**
+Inspected `apps/web/app/phase1-proof/page.tsx:162-175` (`runAll`) and `apps/web/strk20-proof/strk20-proof.ts:325-396` (`runPhase1Proof`).
+
+1. **Does runAll call only Shield?** No — `runAll` delegated to `runPhase1Proof` which sequenced shield → balances → transfer → withdraw. So it *intended* to call all, but the sequence was flawed (see below).
+2. **Does it call subsequent functions but return early?** Yes — `runPhase1Proof` returned early via thrown exception that was caught by page's `guard`, leaving `setEvidence` never updated (old evidence remained, user perceived "stops after Shield").
+3. **Stops because Shield returns before confirmation?** Yes — `shieldResult.transaction_hash` is returned immediately on submission, but the tx is not yet accepted and the new private note is not yet discoverable/mature (~10 blocks per `docs/STRK20_INTEGRATION.md` §9.1). The next step `strk20Balances`/`transfer` ran immediately and failed (most likely `INSUFFICIENT_PRIVATE_BALANCE` or `PRIVACY_LEAK` or still `NOT_REGISTERED` if the wallet's note discovery had not yet completed). Manual clicks work because the human delay covers confirmation/maturity. The automated flow had zero wait — violates the "do not assume immediate next call is sufficient" guidance.
+4. **Stops because React state has not updated yet?** Partially — `runAll` used `addressRef.current` to compute `recipient` *before* `connectWallet` inside `runPhase1Proof` had returned the fresh `address`. If the user clicked `Run full flow` without a prior `Connect`, `addressRef.current` was `null` so `recipient` became `""` (empty string) which then caused `PRIVATE TRANSFER` to be constructed with an invalid recipient (`""`) and `INVALID_REQUEST_PAYLOAD`. The old `runAll` then passed `"" as Address` — `runPhase1Proof` had no fallback and would have failed on transfer. `runPhase1Proof` now has a fallback to `address` (self-transfer) but `runAll`'s stale `recipient` computation was still the root of the empty-recipient bug.
+5. **Stops because next operation is gated on stale state?** Yes — `runAll` did `accountRef.current = null` *after* the run, but more importantly it computed `recipient` from stale `addressRef` and never updated `step`/`evidence` incrementally — only at the end, so a failure after Shield left no progress visible and the busy flag hid the step.
+6. **Stops because an exception is swallowed?** No — `guard` correctly surfaces the error via `setError(formatWalletError(e))`, but because `runAll` only called `setEvidence(full)` on success, a failure left evidence at its pre-run value. The error was shown, but the user saw "Shield worked" via the wallet's own UI and the page showed no shield tx hash, creating the impression that only Shield ran.
+7. **Requires waiting for Shield tx confirmation/mature before Transfer?** **Yes — this is the primary cause.** The fix must await `waitForTransaction(txHash)` and poll `strk20Balances` until the shielded balance is spendable before attempting the next private operation. The task's hint about ERC20 approval + note maturity is exactly this.
+
+**Fix applied (smallest, orchestration-only — no change to shield/transfer/withdraw implementations, no wallet discovery change, no Wallet API version change):**
+
+*`apps/web/strk20-proof/strk20-proof.ts`* — added two exported helpers after `createStrk20Account` (no dependency upgrade):
+- `waitForTxAccepted(network, txHash, 120_000)` — wraps `RpcProvider.waitForTransaction(txHash)` with a bounded poll (3s interval, 120s timeout). Hash comes from `wallet_strk20InvokeTransaction`; we await acceptance before spending the note.
+- `waitForShieldedBalance(account, token, minAmount, 90_000)` — polls `account.strk20Balances([token])` every 3s until `balance >= minAmount` (handles note discovery + maturity). Using `minAmount = transferAmount` (not full shield amount, to tolerate fees) for the post-shield wait; post-transfer wait uses `0x1`.
+- Updated `runPhase1Proof` to: (a) default `recipient` to `address` if the passed `recipient` is empty/invalid (so `Run full flow` with empty input becomes a self-transfer, matching the page's old fallback but now using the fresh `address` from `connectWallet`); (b) after Shield `await waitForTxAccepted` + `await waitForShieldedBalance(transferAmount)`; after Transfer `await waitForTxAccepted` + short balance poll; after Withdraw `await waitForTxAccepted`. Errors remain unswallowed so Gate 1 cannot be faked.
+
+*`apps/web/app/phase1-proof/page.tsx`* — replaced the delegating `runAll` (`runPhase1Proof` → setEvidence at end) with an explicit orchestration that mirrors the working individual buttons:
+- Imports `waitForTxAccepted`, `waitForShieldedBalance` (no longer imports `runPhase1Proof`).
+- `runAll` now: `setStep("connect")` → `connectWallet` → `detectStrk20Capability` → `createStrk20Account` → update `evidence`/`step` incrementally; then Shield → `waitForTxAccepted` + `waitForShieldedBalance` → `setEvidence` shield + `setStep("shield")`; Balances → `setEvidence` + `setStep("private-balances")`; Transfer (effectiveRecipient = `recipient.trim()` valid ? it : `address`) → `waitForTxAccepted` → `setEvidence` + `setStep("private-transfer")`; Withdraw → `waitForTxAccepted` → `setEvidence` + `setStep("withdraw")`. Each step logs `console.info("[phase1-proof] runAll <op> -> wallet_strk20...")` with exact params.
+- `effectiveRecipient` is computed *after* `connectWallet` so it uses the fresh `address`, fixing the stale `addressRef` bug (§21 diagnosis #4).
+- Keeps `accountRef.current = account` (not nulled) so subsequent individual clicks still work; `guard` still surfaces the exact error and `step` shows the last completed step.
+- No change to `shield`, `balances`, `transfer`, `withdraw` individual handlers — they remain the source of truth as instructed.
+
+**Verification performed:**
+- `corepack pnpm --filter @verity/web exec tsc --noEmit` — **EXIT 0**
+- `corepack pnpm --filter @verity/web run build` — **Compiled successfully in 18.2s, TypeScript 6.3s, Generating static pages 4/4 in 875ms**, routes `○ /`, `○ /_not-found`, `○ /phase1-proof`
+- `git diff --stat` — only `apps/web/app/phase1-proof/page.tsx` + `apps/web/strk20-proof/strk20-proof.ts` (+ this handoff). No `next-env.d.ts` drift, no untracked artifacts, working tree clean before commit.
+- Manual wallet test of `Run full flow` not performed by agent (requires real Ready X signing and note-maturity waits >60s). Build + typecheck are the only automated evidence; Gate 1 remains **NO** (no new `transaction_hash` recorded).
+
+**Next step (exact):**
+1. Reload `http://localhost:3000/phase1-proof`, open console, click `Run full flow` (leave Recipient empty to test self-transfer fallback). Observe `console.info` per step and `step` indicator updating: `connect` → `feature-detect` → `shield` → `private-balances` → `private-transfer` → `withdraw`. Each wallet prompt must be approved; after Shield the UI will show "Waiting…" while `waitForTxAccepted` + `waitForShieldedBalance` poll — this is expected (30–120s). If a step fails, the error + step are shown; capture the exact `console.info` params and the `waitFor*` timeout message.
+2. If Shield still needs an explicit ERC20 `approve` before the private deposit on this wallet/network, the Shield `wallet_strk20InvokeTransaction` will surface it as a separate wallet prompt or as `INSUFFICIENT_*` — the new waits will surface it as a clear error rather than a silent stop.
+3. Once `Run full flow` returns all four `transaction_hash`es (shield/balances/transfer/withdraw) linked to Sepolia Voyager, record them in `strk20.json` and note them here — only then Gate 1 → YES.
+4. Do NOT start Phase 2.
+
+**Files changed (this commit):**
+- `apps/web/strk20-proof/strk20-proof.ts` — added `waitForTxAccepted` + `waitForShieldedBalance`, fixed `runPhase1Proof` orchestration + recipient fallback
+- `apps/web/app/phase1-proof/page.tsx` — rewrote `runAll` to explicitly sequence with waits + incremental UI, fixed stale recipient
+- `docs/AI_HANDOFF.md` — this §21
+
+**Known issues / blockers:**
+- Gate 1 = **NO** (individual operations now verified by user, full-flow orchestration just fixed — needs manual re-test with waits).
+- Phase 2 = **NOT AUTHORIZED**.
 

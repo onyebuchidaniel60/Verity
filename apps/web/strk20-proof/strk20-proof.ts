@@ -312,6 +312,89 @@ export async function createStrk20Account(
 }
 
 /**
+ * Wait for a Starknet transaction to be accepted on L2 / L1.
+ * Uses the public RPC provider's waitForTransaction. The transaction hash
+ * returned by wallet_strk20InvokeTransaction is only the submission hash —
+ * the note is not spendable until the tx is confirmed and the note has
+ * matured. Individual button clicks implicitly wait (human delay) but the
+ * automated full-flow must await explicitly.
+ */
+export async function waitForTxAccepted(
+  network: VerityNetwork,
+  txHash: string,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const provider = createProvider(network);
+  // starknet.js RpcProvider.waitForTransaction polls until successStates includes ACCEPTED_ON_L2 etc.
+  // We bound it with our own timeout so a stuck tx does not hang forever.
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      // waitForTransaction with a short retry interval; if it resolves, tx is accepted.
+      // We use 1 retry + 3s interval to avoid hammering the public RPC.
+      await provider.waitForTransaction(txHash, {
+        retries: 1,
+        retryInterval: 3000,
+      } as unknown as Record<string, unknown>);
+      return;
+    } catch (e) {
+      // If the tx is still pending, waitForTransaction throws; we retry until timeout.
+      const msg = e instanceof Error ? e.message : String(e);
+      // If the error is clearly a reverted/failed tx, surface immediately.
+      if (/revert|fail|error/i.test(msg) && !/timeout|not found|receipt/i.test(msg)) {
+        throw e;
+      }
+      if (Date.now() - start >= timeoutMs) throw e;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  throw new Error(`Timeout waiting for transaction ${txHash} to be accepted (${timeoutMs}ms)`);
+}
+
+/**
+ * Poll wallet_strk20Balances until the shielded balance for `token` is at
+ * least `minAmount` (felt hex). This handles note discovery + maturity:
+ * after Shield the wallet must discover the new note and the note must mature
+ * (~10 blocks per docs/STRK20_INTEGRATION.md §9.1) before it is spendable.
+ * Individual clicks wait manually; the full-flow must poll.
+ */
+export async function waitForShieldedBalance(
+  account: WalletAccountV6,
+  token: Address,
+  minAmount: string,
+  timeoutMs = 90_000,
+  pollMs = 3000,
+): Promise<STRK20_BALANCE_ENTRY[]> {
+  const start = Date.now();
+  const min = BigInt(minAmount);
+  let last: STRK20_BALANCE_ENTRY[] = [];
+  while (Date.now() - start < timeoutMs) {
+    try {
+      last = await account.strk20Balances([token]);
+      const entry = last.find((b) => b.token.toLowerCase() === token.toLowerCase());
+      if (entry) {
+        try {
+          const bal = BigInt(entry.balance);
+          if (bal >= min) return last;
+        } catch {
+          // if balance not parseable as BigInt, fall through to retry
+        }
+      }
+      // If minAmount is "0x0" or similar, any balance entry is sufficient; otherwise keep polling.
+      if (min === 0n && last.length > 0) return last;
+    } catch (e) {
+      // NOT_REGISTERED or transient errors should propagate immediately
+      throw e;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  // Timeout — return last observed so caller can decide, but we throw to make the step fail explicitly
+  throw new Error(
+    `Timeout waiting for shielded balance >= ${minAmount} for token ${token} (last: ${JSON.stringify(last)})`,
+  );
+}
+
+/**
  * Run the smallest official private-dapp flow, recording ONLY real evidence.
  *
  *   shield -> strk20Balances -> private transfer -> withdraw
@@ -354,7 +437,18 @@ export async function runPhase1Proof(
 
   const account = await createStrk20Account(wallet, config);
 
+  // Resolve recipient: full-flow may be called with empty string (page's stale
+  // addressRef). Use the connected address as self-transfer fallback so the
+  // automated flow does not fail with INVALID_REQUEST_PAYLOAD. Individual
+  // Transfer button validates recipient separately.
+  const effectiveRecipient: Address =
+    recipient && recipient.trim() && /^0x[0-9a-fA-F]+$/.test(recipient.trim())
+      ? (recipient.trim() as Address)
+      : address;
+
   // 1. Shield: deposit into the real STRK20 privacy pool (wallet signs + proves).
+  // This may involve two wallet prompts (ERC20 approve + private deposit) and
+  // the resulting note needs ~10 blocks to mature before it is spendable.
   const shieldActions = [shieldAction(config.token, amounts.shield)];
   const shieldResult = await account.strk20InvokeTransaction(shieldActions);
   if (!shieldResult?.transaction_hash) {
@@ -362,13 +456,21 @@ export async function runPhase1Proof(
   }
   evidence.shield = { actions: shieldActions, transactionHash: shieldResult.transaction_hash };
   evidence.lastCompletedStep = "shield";
+  // Wait for the shield tx to be accepted and for the note to be discoverable/mature.
+  // Without this, the immediate strk20Balances/transfer would see 0 and fail with
+  // INSUFFICIENT_PRIVATE_BALANCE — manual clicks work because the user waits.
+  await waitForTxAccepted(config.network, shieldResult.transaction_hash, 120_000);
+  // Poll until wallet reports a spendable shielded balance (maturity). Use the
+  // transfer amount as the minimum needed for the next step, not the full shield
+  // amount (fees may reduce the exact shielded value).
+  await waitForShieldedBalance(account, config.token, amounts.transfer !== "0x0" ? amounts.transfer : "0x1", 90_000);
 
   // 2. Real wallet-side shielded balance read for the same token.
   evidence.balancesAfterShield = await account.strk20Balances([config.token]);
   evidence.lastCompletedStep = "private-balances";
 
   // 3. Private transfer (no public leg; wallet proves and submits).
-  const transferActions = [privateTransferAction(config.token, amounts.transfer, recipient)];
+  const transferActions = [privateTransferAction(config.token, amounts.transfer, effectiveRecipient)];
   const transferResult = await account.strk20InvokeTransaction(transferActions);
   if (!transferResult?.transaction_hash) {
     throw new Error("Private transfer returned no transaction_hash — wallet rejected it.");
@@ -378,6 +480,15 @@ export async function runPhase1Proof(
     transactionHash: transferResult.transaction_hash,
   };
   evidence.lastCompletedStep = "private-transfer";
+  await waitForTxAccepted(config.network, transferResult.transaction_hash, 120_000);
+  // Give the wallet a moment to update its local note set after transfer before withdraw.
+  // Withdraw spends the sender's remaining note, which also benefits from maturity.
+  // A short balance poll ensures the post-transfer state is queryable.
+  try {
+    await waitForShieldedBalance(account, config.token, "0x1", 30_000);
+  } catch {
+    // Non-fatal for the transfer step — we already have the tx hash; proceed to withdraw.
+  }
 
   // 4. Withdraw (unshield) back to a public address.
   const withdrawActions = [withdrawAction(config.token, amounts.withdraw, address)];
@@ -390,6 +501,7 @@ export async function runPhase1Proof(
     transactionHash: withdrawResult.transaction_hash,
   };
   evidence.lastCompletedStep = "withdraw";
+  await waitForTxAccepted(config.network, withdrawResult.transaction_hash, 120_000);
 
   evidence.completedAt = new Date().toISOString();
   return evidence;

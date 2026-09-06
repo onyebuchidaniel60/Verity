@@ -19,8 +19,9 @@ import {
   createStrk20Account,
   detectStrk20Capability,
   privateTransferAction,
-  runPhase1Proof,
   shieldAction,
+  waitForShieldedBalance,
+  waitForTxAccepted,
   withdrawAction,
   WALLET_API_MIN_VERSION,
   type Address,
@@ -160,18 +161,112 @@ export default function Phase1ProofPage() {
   });
 
   const runAll = () => guard(async () => {
-    const full = await runPhase1Proof(
-      { network: NETWORK, token: STRK_TOKEN_ADDRESS },
-      {
-        shield: toBaseUnits(shieldAmt),
-        transfer: toBaseUnits(transferAmt),
-        withdraw: toBaseUnits(withdrawAmt),
-      },
-      (recipient.trim() || (addressRef.current ?? "")) as Address,
-    );
-    accountRef.current = null;
-    setStep(full.lastCompletedStep);
-    setEvidence(full);
+    // Orchestrate the same working individual operations in order, awaiting
+    // each prerequisite. Previous implementation delegated to runPhase1Proof()
+    // and only updated UI at the end, so a failure after Shield left no
+    // progress and the note-maturity wait was missing — manual clicks worked
+    // because the user waited, but the automated flow did not.
+    // This handler explicitly sequences: connect -> shield (wait for tx + mature)
+    // -> balances -> transfer (wait) -> withdraw (wait), updating step/evidence
+    // after each real operation and stopping with the exact error if a step fails.
+
+    // 1. Connect + feature-detect (reuses the staged Connect logic but keeps
+    //    the account for the subsequent steps; do not rely on stale page state).
+    setStep("connect");
+    setEvidence((p) => ({ ...p, lastCompletedStep: "connect" }));
+    const { wallet, address, walletId, walletName, chainId } = await connectWallet();
+    addressRef.current = address;
+    const cap = await detectStrk20Capability(wallet);
+    if (!cap.supported) {
+      throw new Error(
+        `Wallet API ${cap.walletApiVersions.join(", ") || "none"} < ${WALLET_API_MIN_VERSION}. ` +
+          "Use Ready (formerly Argent).",
+      );
+    }
+    const account = await createStrk20Account(wallet, { network: NETWORK, token: STRK_TOKEN_ADDRESS });
+    accountRef.current = account;
+    setStep("feature-detect");
+    setEvidence((p) => ({
+      ...p,
+      network: NETWORK,
+      poolAddress: STRK20[NETWORK].poolAddress,
+      tokenAddress: STRK_TOKEN_ADDRESS,
+      walletId,
+      walletName,
+      walletAddress: address,
+      ...(chainId ? { chainId } : {}),
+      walletApiVersions: cap.walletApiVersions,
+      walletApiSupported: true,
+      lastCompletedStep: "feature-detect",
+    }));
+    // Keep UI responsive while the wallet proves; guard's busy flag is already true.
+
+    const shieldAmount = toBaseUnits(shieldAmt);
+    const transferAmount = toBaseUnits(transferAmt);
+    const withdrawAmount = toBaseUnits(withdrawAmt);
+    // Default Transfer recipient to self if the input is empty — runPhase1Proof
+    // does the same, but page's old runAll used stale addressRef and could pass "".
+    const effectiveRecipient = (
+      recipient.trim() && /^0x[0-9a-fA-F]+$/.test(recipient.trim()) ? recipient.trim() : address
+    ) as Address;
+
+    // 2. Shield — may prompt for ERC20 approve + private deposit, then note must mature (~10 blocks).
+    // Individual Shield button works; full-flow must wait before spending.
+    setStep("shield");
+    {
+      const token = STRK_TOKEN_ADDRESS as Address;
+      const actions = [shieldAction(token, shieldAmount)];
+      console.info("[phase1-proof] runAll shield -> wallet_strk20InvokeTransaction", { actions, pool: STRK20[NETWORK].poolAddress });
+      const res = await account.strk20InvokeTransaction(actions);
+      if (!res?.transaction_hash) throw new Error("Shield returned no transaction_hash.");
+      setEvidence((p) => ({ ...p, shield: { actions, transactionHash: res.transaction_hash }, lastCompletedStep: "shield" }));
+      // Wait for the shield tx to be accepted, then for the shielded balance to become spendable.
+      await waitForTxAccepted(NETWORK, res.transaction_hash, 120_000);
+      await waitForShieldedBalance(account, token, transferAmount !== "0x0" ? transferAmount : "0x1", 90_000);
+    }
+
+    // 3. Balances — wallet-side read, should now show the shielded amount.
+    {
+      const token = STRK_TOKEN_ADDRESS as Address;
+      console.info("[phase1-proof] runAll balances -> wallet_strk20Balances", { tokens: [token] });
+      const list = await account.strk20Balances([token]);
+      setEvidence((p) => ({ ...p, balancesAfterShield: list, lastCompletedStep: "private-balances" }));
+      setStep("private-balances");
+    }
+
+    // 4. Private transfer
+    {
+      const token = STRK_TOKEN_ADDRESS as Address;
+      const actions = [privateTransferAction(token, transferAmount, effectiveRecipient)];
+      console.info("[phase1-proof] runAll transfer -> wallet_strk20InvokeTransaction", { actions });
+      const res = await account.strk20InvokeTransaction(actions);
+      if (!res?.transaction_hash) throw new Error("Transfer returned no transaction_hash.");
+      setEvidence((p) => ({ ...p, transfer: { actions, transactionHash: res.transaction_hash }, lastCompletedStep: "private-transfer" }));
+      setStep("private-transfer");
+      await waitForTxAccepted(NETWORK, res.transaction_hash, 120_000);
+      try {
+        await waitForShieldedBalance(account, token, "0x1", 30_000);
+      } catch {
+        // Non-fatal — transfer already succeeded; proceed to withdraw.
+      }
+    }
+
+    // 5. Withdraw
+    {
+      const token = STRK_TOKEN_ADDRESS as Address;
+      const actions = [withdrawAction(token, withdrawAmount, address)];
+      console.info("[phase1-proof] runAll withdraw -> wallet_strk20InvokeTransaction", { actions });
+      const res = await account.strk20InvokeTransaction(actions);
+      if (!res?.transaction_hash) throw new Error("Withdraw returned no transaction_hash.");
+      await waitForTxAccepted(NETWORK, res.transaction_hash, 120_000);
+      setEvidence((p) => ({
+        ...p,
+        withdraw: { actions, transactionHash: res.transaction_hash },
+        completedAt: new Date().toISOString(),
+        lastCompletedStep: "withdraw",
+      }));
+      setStep("withdraw");
+    }
   });
 
   const btn = "rounded border px-3 py-1 text-sm disabled:opacity-40";
