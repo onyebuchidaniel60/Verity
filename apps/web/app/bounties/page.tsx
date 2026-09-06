@@ -36,6 +36,14 @@ function formatReward(v: any) {
   }
 }
 
+function getStoredMeta(id: number) {
+  try {
+    const raw = localStorage.getItem(`verity_bounty_${id}`);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
 export default function BountiesPage() {
   const [bounties, setBounties] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,7 +70,8 @@ export default function BountiesPage() {
           try {
             const r: any = await c.call("get_bounty", [i]);
             const b = r?.bounty ?? r;
-            list.push({ id: i, ...b });
+            const meta = getStoredMeta(i);
+            list.push({ id: i, ...b, _meta: meta });
           } catch {}
         }
         setBounties(list.reverse());
@@ -137,16 +146,17 @@ export default function BountiesPage() {
             const statusKey = String(b.status ?? b.bounty_status ?? "CREATED");
             const meta = STATUS_LABEL[statusKey] ?? { label: statusKey, cls: "badge-created" };
             const id = b.id ?? b.bounty_id ?? b[0];
+            const stored = (b as any)._meta as any;
+            const title = stored?.title || `Bounty #${id}`;
+            const excerpt = stored?.description ? stored.description.slice(0, 110) + (stored.description.length > 110 ? "…" : "") : "Investigation bounty — evidence required";
             return (
               <Link key={id} href={`/bounty/${id}`} className="card card-pad card-hover" style={{ display: "block" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
                   <span className={`badge ${meta.cls}`}>{meta.label}</span>
                   <span style={{ fontSize: 13, fontWeight: 600, color: "var(--accent)" }}>{formatReward(b.reward_amount ?? b.rewardAmount ?? b[2])}</span>
                 </div>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px", lineHeight: 1.4 }}>Bounty #{id}</h3>
-                <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 8px", lineHeight: 1.5 }}>
-                  {b.metadata_hash ? `Evidence ref: ${String(b.metadata_hash).slice(0, 24)}…` : "Investigation bounty — evidence required"}
-                </p>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px", lineHeight: 1.4 }}>{title}</h3>
+                <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 8px", lineHeight: 1.5 }}>{excerpt}</p>
                 <div style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-muted)" }}>
                   <span>Created {b.created_at ? new Date(Number(b.created_at) * 1000).toLocaleDateString() : ""}</span>
                   <span>•</span>

@@ -32,8 +32,7 @@ export default function CreateBountyPage() {
       if (!title.trim()) throw new Error("Please add a bounty title");
       if (!reward.trim()) throw new Error("Please set a reward");
       const rewardWei = humanToWei(reward);
-      const metadata = title.trim().slice(0, 31) || "0x1234";
-      // Simple metadata hash: use title as felt (short string)
+      const metadata = title.trim().slice(0, 31) || "Verity Bounty";
       const metadataFelt = "0x" + Buffer.from(metadata).toString("hex").slice(0, 62) || "0x1234";
 
       const { wallet } = await connectWallet();
@@ -44,23 +43,37 @@ export default function CreateBountyPage() {
         { name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" },
       ] as const;
 
-      // Show confirmation hint
       const contract = new Contract({ abi: abi as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
       const res: any = await contract.invoke("create_bounty", [rewardWei, metadataFelt]);
       const hash = res.transaction_hash ?? res.hash ?? "";
-      // Optimistically get count
       let newId: number | null = null;
       try {
         const c2 = new Contract({ abi: [{ name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
         const r: any = await c2.call("get_bounty_count", []);
         newId = Number(r?.count ?? r) || null;
+        // Persist full metadata off-chain for display (title, description, reward)
+        if (newId) {
+          const meta = { title: title.trim(), description: description.trim(), reward, rewardWei, metadataFelt, createdAt: Date.now() };
+          try {
+            localStorage.setItem(`verity_bounty_${newId}`, JSON.stringify(meta));
+            // Also keep an index
+            const idxRaw = localStorage.getItem("verity_bounty_index");
+            const idx = idxRaw ? JSON.parse(idxRaw) : [];
+            if (!idx.includes(newId)) {
+              idx.push(newId);
+              localStorage.setItem("verity_bounty_index", JSON.stringify(idx));
+            }
+          } catch {}
+        }
       } catch {}
       setSuccess({ hash, id: newId });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("USER_REFUSED")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
-      else if (msg.includes("INSUFFICIENT")) setError("Insufficient balance to create this bounty. Try a smaller reward or add funds.");
+      if (msg.includes("USER_REFUSED") || msg.includes("user rejected") || msg.includes("UserRejected")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
+      else if (msg.includes("INSUFFICIENT") || msg.includes("balance")) setError("Insufficient balance to create this bounty. Try a smaller reward or add funds.");
+      else if (msg.includes("Validate Unhandled")) setError("We couldn't prepare that reward amount. Please try a different amount.");
       else setError(msg);
+      console.error("[create bounty] failed", e);
     } finally {
       setBusy(false);
     }

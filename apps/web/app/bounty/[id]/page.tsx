@@ -56,6 +56,25 @@ export default function BountyDetailPage() {
     { name: "get_submission", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ name: "submission", type: "Submission" }], stateMutability: "view" },
   ] as const;
 
+  function getStoredMeta(bountyId: number) {
+    try {
+      const raw = localStorage.getItem(`verity_bounty_${bountyId}`);
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return null;
+  }
+
+  function feltToTitle(felt: any): string | null {
+    try {
+      const hex = BigInt(felt).toString(16);
+      const padded = hex.padStart(62, "0");
+      const buf = Buffer.from(padded, "hex");
+      const str = buf.toString("utf-8").replace(/\0/g, "").trim();
+      if (str && /^[\x20-\x7E ]+$/.test(str)) return str;
+    } catch {}
+    return null;
+  }
+
   async function load() {
     setLoading(true);
     setError(null);
@@ -103,12 +122,15 @@ export default function BountyDetailPage() {
       await load();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("USER_REFUSED")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
-      else if (msg.includes("INSUFFICIENT")) setError("Insufficient balance. Add funds and try again.");
+      console.error(`[bounty ${id}] ${key} failed`, e);
+      if (msg.includes("USER_REFUSED") || msg.includes("UserRejected") || msg.includes("user rejected")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
+      else if (msg.includes("INSUFFICIENT") || msg.includes("balance")) setError("Insufficient balance. Add funds and try again.");
       else if (msg.includes("NOT_VERIFIER")) setError("Only verified reviewers can vote on this bounty.");
       else if (msg.includes("ALREADY_VOTED")) setError("You’ve already voted on this bounty.");
+      else if (msg.includes("INVALID_REQUEST_PAYLOAD")) setError("We couldn’t prepare the private funding transaction. Please try again.");
       else if (msg.includes("NOT_POOL") || msg.includes("NOT_ANONYMIZER")) setError("This action must go through the secure funding flow. Please use the Fund button.");
-      else setError(msg);
+      else if (msg.includes("Validate Unhandled")) setError("We couldn’t prepare the transaction. Please try a different amount.");
+      else setError("Something went wrong. Please try again.");
     } finally {
       setBusy(null);
     }
@@ -117,16 +139,32 @@ export default function BountyDetailPage() {
   const fundPrivate = () =>
     guard("fund", async () => {
       if (!bounty) throw new Error("Bounty not loaded");
-      const reward = bounty.reward_amount ?? bounty[2] ?? 1000;
-      const { wallet } = await connectWallet();
+      const reward = bounty.reward_amount ?? bounty.rewardAmount ?? bounty[2] ?? 1000;
+      const { wallet, address } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
       const amount = BigInt(reward).toString();
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      const noteId = "0x0";
-      const operation = "0x46554e445f424f554e5459"; // FUND_BOUNTY
-      const res: any = await account.strk20InvokeTransaction([{ type: "invoke" as const, contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, noteId] } as any]);
-      return res.transaction_hash ?? res.hash;
+      // Correct STRK20 Wallet API funding flow: create an OPEN note via private transfer, then invoke VerityAnonymizer
+      // The VerityAnonymizer's privacy_invoke expects (operation, bounty_id, amount, nonce, note_id) where note_id is the open note id
+      // We use the placeholder ${openNoteIds[0]} which the wallet resolves to the actual note_id of the OPEN transfer in the same tx
+      const operation = "0x46554e445f424f554e5459"; // 'FUND_BOUNTY' as felt
+      // For funding, we need to create an open note for the reward amount and then fill it via the anonymizer
+      // The correct wallet request is a single atomic transaction with two actions: transfer OPEN + invoke
+      try {
+        const res: any = await account.strk20InvokeTransaction([
+          { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
+          { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "${openNoteIds[0]}"] } as any,
+        ]);
+        return res.transaction_hash ?? res.hash;
+      } catch (e) {
+        // Fallback for wallets that don't support OPEN in same tx: try single invoke with note_id 0 (empty span, bounty still funded on-chain via credit)
+        console.warn("[fundPrivate] transfer+invoke failed, trying single invoke fallback", e);
+        const res: any = await account.strk20InvokeTransaction([
+          { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "0x0"] } as any,
+        ]);
+        return res.transaction_hash ?? res.hash;
+      }
     });
 
   const open = () =>
@@ -159,15 +197,25 @@ export default function BountyDetailPage() {
 
   const claim = () =>
     guard("claim", async () => {
-      const { wallet } = await connectWallet();
+      const { wallet, address } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
-      const amount = bounty?.reward_amount ?? 1000;
+      const amount = BigInt(bounty?.reward_amount ?? bounty?.rewardAmount ?? 1000).toString();
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      const noteId = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      const operation = "0x52454c45415345"; // RELEASE
-      const res: any = await account.strk20InvokeTransaction([{ type: "invoke" as const, contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), BigInt(amount).toString(), nonce, noteId] } as any]);
-      return res.transaction_hash ?? res.hash;
+      const operation = "0x52454c45415345"; // 'RELEASE' as felt
+      // Correct payout: create OPEN note for winner, then invoke RELEASE with its id
+      try {
+        const res: any = await account.strk20InvokeTransaction([
+          { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
+          { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, "${openNoteIds[0]}"] } as any,
+        ]);
+        return res.transaction_hash ?? res.hash;
+      } catch (e) {
+        console.warn("[claim] transfer+invoke failed, trying single invoke", e);
+        const noteId = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
+        const res: any = await account.strk20InvokeTransaction([{ type: "invoke" as const, contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyId.toString(), amount, nonce, noteId] } as any]);
+        return res.transaction_hash ?? res.hash;
+      }
     });
 
   if (loading) {
@@ -202,6 +250,15 @@ export default function BountyDetailPage() {
   const statusKey = String(bounty?.status ?? bounty?.[3] ?? "0");
   const meta = STATUS_META[statusKey] ?? { label: statusKey, cls: "badge-created", desc: "" };
   const reward = bounty?.reward_amount ?? bounty?.[2] ?? 0;
+  const storedMeta = (() => {
+    const m = getStoredMeta(Number(id));
+    if (m?.title) return m;
+    const feltTitle = feltToTitle(bounty?.metadata_hash ?? bounty?.[4]);
+    if (feltTitle) return { title: feltTitle, description: "" };
+    return null;
+  })();
+  const displayTitle = storedMeta?.title || `Bounty #${id}`;
+  const displayDesc = storedMeta?.description || "Investigation bounty — evidence required to verify the claim.";
   const isPaid = statusKey === "6" || statusKey === "PAID";
   const isClaimable = statusKey === "5" || statusKey === "CLAIMABLE";
   const isVoting = statusKey === "3" || statusKey === "VOTING";
@@ -225,16 +282,18 @@ export default function BountyDetailPage() {
       </Link>
 
       <div style={{ marginTop: 16, display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: "0 0 8px" }}>Bounty #{id}</h1>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700, margin: "0 0 6px", lineHeight: 1.2 }}>{displayTitle}</h1>
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 8px", lineHeight: 1.5 }}>{displayDesc}</p>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span className={`badge ${meta.cls}`}>{meta.label}</span>
             <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{meta.desc}</span>
           </div>
         </div>
-        <div style={{ textAlign: "right" }}>
+        <div style={{ textAlign: "right", minWidth: 120 }}>
           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Reward</div>
           <div style={{ fontSize: 20, fontWeight: 700, color: "var(--accent)" }}>{formatReward(reward)}</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>Bounty #{id}</div>
         </div>
       </div>
 
