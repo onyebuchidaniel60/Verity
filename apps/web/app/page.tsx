@@ -1,70 +1,95 @@
-import type { Metadata } from "next";
 import Link from "next/link";
-import ConnectWallet from "@/components/ConnectWallet";
-import { STRK20 } from "@/lib/strk20";
-import { VERITY_NETWORKS } from "@/lib/starknet";
-import { BOUNTY_LIFECYCLE, VERIFIER_SET_SIZE, WINNER_THRESHOLD } from "@/lib/bounty";
-import { CONTRACTS } from "@/lib/contracts";
-
-export const metadata: Metadata = {
-  title: "VERITY — Private Bounty & Truth Marketplace",
-  description: "A private bounty & truth marketplace on Starknet, powered by genuine STRK20 privacy.",
-};
 
 export default function Home() {
   return (
-    <main className="verity-shell">
-      <section className="verity-hero">
-        <h1>VERITY</h1>
-        <p className="verity-tagline">A private market for verified intelligence.</p>
-        <ConnectWallet />
-        <div className="mt-4 flex gap-2">
-          <Link href="/bounties" className="rounded bg-black px-4 py-2 text-white">
-            Browse Bounties
+    <div className="animate-in">
+      <section className="hero">
+        <h1>
+          Private payments.
+          <br />
+          Transparent truth.
+        </h1>
+        <p>
+          Create bounties for investigations and research. Fund them privately and reward the best evidence — verified by the
+          community, paid in private.
+        </p>
+        <div className="hero-actions">
+          <Link href="/create" className="btn btn-primary btn-lg">
+            Create a bounty →
           </Link>
-          <Link href="/create" className="rounded border px-4 py-2">
-            Create Bounty
-          </Link>
-          <Link href="/phase1-proof" className="rounded border px-4 py-2">
-            Phase 1 Proof
+          <Link href="/bounties" className="btn btn-secondary btn-lg">
+            Explore bounties
           </Link>
         </div>
       </section>
 
-      <section className="verity-status">
-        <h2>Live on Sepolia</h2>
-        <p>
-          BountyManager: <code className="break-all">{CONTRACTS.bountyManager}</code>
-          <br />
-          VerityAnonymizer: <code className="break-all">{CONTRACTS.verityAnonymizer}</code>
-          <br />
-          Pool: <code>{STRK20.sepolia.poolAddress}</code> (Sepolia)
-        </p>
-        <p>
-          Lifecycle: <code>{BOUNTY_LIFECYCLE.join(" → ")}</code>. Verifiers: <strong>{VERIFIER_SET_SIZE}</strong>, threshold{" "}
-          <strong>{WINNER_THRESHOLD} / {VERIFIER_SET_SIZE}</strong>.
-        </p>
+      <section style={{ marginTop: 48 }}>
+        <div className="card card-pad">
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: "0 0 16px" }}>How VERITY works</h2>
+          <div className="steps">
+            <div className="step">
+              <div className="step-icon">◈</div>
+              <h3>Create</h3>
+              <p>Describe your question and set a reward</p>
+            </div>
+            <div className="step">
+              <div className="step-icon">◎</div>
+              <h3>Fund</h3>
+              <p>Deposit securely — in-pool movement stays private</p>
+            </div>
+            <div className="step">
+              <div className="step-icon">⬡</div>
+              <h3>Submit</h3>
+              <p>Investigators share evidence</p>
+            </div>
+            <div className="step">
+              <div className="step-icon">⬢</div>
+              <h3>Vote</h3>
+              <p>13 verifiers review, 7 needed to decide</p>
+            </div>
+            <div className="step">
+              <div className="step-icon">✦</div>
+              <h3>Reward</h3>
+              <p>Winner claims privately</p>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <section className="verity-networks">
-        <h2>Networks</h2>
-        <ul>
-          {Object.values(VERITY_NETWORKS).map((n) => (
-            <li key={n.id}>
-              <strong>{n.name}</strong> · <code>{n.chainId}</code>
-            </li>
-          ))}
-        </ul>
+      <section style={{ marginTop: 24, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+        <div className="card card-pad">
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Private funding</h3>
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
+            Your deposit and payout move through the STRK20 privacy pool. Who you pay and how much stays private inside the
+            pool.
+          </p>
+        </div>
+        <div className="card card-pad">
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Transparent progress</h3>
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
+            Bounty status, submissions, and votes are public and auditable. You always know where things stand.
+          </p>
+        </div>
+        <div className="card card-pad">
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Community verified</h3>
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
+            Trusted verifiers review evidence. A submission needs 7 of 13 votes to win — no single party decides.
+          </p>
+        </div>
       </section>
 
-      <section className="verity-privacy-note">
-        <h2>Privacy</h2>
-        <p>
-          Funding and payout move through the real STRK20 pool (`privacy_invoke` → `VerityAnonymizer` → `BountyManager`). In-pool
-          sender/amount are private; deposits, pool interaction, and bounty state are public. See{" "}
-          <code>docs/PRIVACY_MODEL.md</code>.
-        </p>
+      <section style={{ marginTop: 32, textAlign: "center" }}>
+        <h2 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 8px" }}>Ready to get started?</h2>
+        <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 16px" }}>Connect your wallet to create and fund bounties securely.</p>
+        <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+          <Link href="/bounties" className="btn btn-primary">
+            Browse bounties
+          </Link>
+          <Link href="/create" className="btn btn-secondary">
+            Create bounty
+          </Link>
+        </div>
       </section>
-    </main>
+    </div>
   );
 }

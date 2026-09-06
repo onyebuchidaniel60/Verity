@@ -1,95 +1,165 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Contract } from "starknet";
 import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof";
-import { createProvider, VERITY_NETWORKS } from "@/lib/starknet";
 import { CONTRACTS } from "@/lib/contracts";
 
 const NETWORK = "sepolia" as const;
 
 export default function CreateBountyPage() {
-  const [reward, setReward] = useState("1000");
-  const [metadata, setMetadata] = useState("0x1234");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [reward, setReward] = useState("1");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [txHash, setTxHash] = useState<string | null>(null);
-  const [bountyId, setBountyId] = useState<number | null>(null);
+  const [success, setSuccess] = useState<{ hash: string; id: number | null } | null>(null);
 
-  async function create() {
+  function humanToWei(s: string): string {
+    const trimmed = s.trim();
+    if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error("Please enter a valid reward amount");
+    const [whole, frac = ""] = trimmed.split(".");
+    const frac18 = (frac + "0".repeat(18)).slice(0, 18);
+    return BigInt(whole + frac18).toString();
+  }
+
+  async function handleCreate() {
     setBusy(true);
     setError(null);
-    setTxHash(null);
+    setSuccess(null);
     try {
-      const { wallet, address } = await connectWallet();
-      const provider = createProvider(NETWORK);
+      if (!title.trim()) throw new Error("Please add a bounty title");
+      if (!reward.trim()) throw new Error("Please set a reward");
+      const rewardWei = humanToWei(reward);
+      const metadata = title.trim().slice(0, 31) || "0x1234";
+      // Simple metadata hash: use title as felt (short string)
+      const metadataFelt = "0x" + Buffer.from(metadata).toString("hex").slice(0, 62) || "0x1234";
+
+      const { wallet } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      // Use the BountyManager ABI from the compiled artifact (fetch)
-      // For MVP, we will use a minimal ABI for create_bounty
+
       const abi = [
-        {
-          name: "create_bounty",
-          type: "function",
-          inputs: [
-            { name: "reward_amount", type: "u128" },
-            { name: "metadata_hash", type: "felt" },
-          ],
-          outputs: [{ name: "bounty_id", type: "u64" }],
-          stateMutability: "external",
-        },
-      ];
+        { name: "create_bounty", type: "function", inputs: [{ name: "reward_amount", type: "core::integer::u128" }, { name: "metadata_hash", type: "core::felt252" }], outputs: [{ name: "bounty_id", type: "core::integer::u64" }], stateMutability: "external" },
+        { name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" },
+      ] as const;
+
+      // Show confirmation hint
       const contract = new Contract({ abi: abi as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      // Convert reward to u128 (felt)
-      const rewardU128 = BigInt(reward);
-      const tx: any = await contract.invoke("create_bounty", [rewardU128.toString(), metadata]);
-      // For WalletAccount, invoke returns transaction_hash via wallet
-      const hash = tx.transaction_hash ?? tx.hash ?? JSON.stringify(tx);
-      setTxHash(hash);
-      // Try to get bounty count to infer id
+      const res: any = await contract.invoke("create_bounty", [rewardWei, metadataFelt]);
+      const hash = res.transaction_hash ?? res.hash ?? "";
+      // Optimistically get count
+      let newId: number | null = null;
       try {
-        const c2 = new Contract({
-          abi: [
-            { name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "u64" }], stateMutability: "view" },
-          ] as any,
-          address: CONTRACTS.bountyManager!,
-          providerOrAccount: provider,
-        });
-        const res: any = await c2.call("get_bounty_count", []);
-        const count = Number(res?.count ?? res);
-        setBountyId(count);
+        const c2 = new Contract({ abi: [{ name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+        const r: any = await c2.call("get_bounty_count", []);
+        newId = Number(r?.count ?? r) || null;
       } catch {}
+      setSuccess({ hash, id: newId });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("USER_REFUSED")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
+      else if (msg.includes("INSUFFICIENT")) setError("Insufficient balance to create this bounty. Try a smaller reward or add funds.");
+      else setError(msg);
     } finally {
       setBusy(false);
     }
   }
 
+  if (success) {
+    return (
+      <main style={{ maxWidth: 480, margin: "0 auto", textAlign: "center", padding: "32px 0" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 16, background: "var(--green-subtle)", border: "1px solid rgba(16,185,129,0.2)", display: "grid", placeItems: "center", margin: "0 auto 16px", fontSize: 24, color: "var(--green)" }}>
+          ✓
+        </div>
+        <h1 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>Your bounty is live</h1>
+        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 16px" }}>
+          It’s now visible to investigators. Next, fund it privately so the reward can be claimed.
+        </p>
+        <div className="card card-pad" style={{ textAlign: "left", marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Transaction</div>
+          <div style={{ fontSize: 12, wordBreak: "break-all", color: "var(--text-secondary)" }}>{success.hash}</div>
+          {success.id && <div style={{ marginTop: 8, fontSize: 13 }}>Bounty #{success.id} — <Link href={`/bounty/${success.id}`} className="underline" style={{ color: "var(--accent)" }}>View bounty →</Link></div>}
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+          <Link href="/bounties" className="btn btn-secondary">
+            Browse bounties
+          </Link>
+          {success.id && (
+            <Link href={`/bounty/${success.id}`} className="btn btn-primary">
+              Go to bounty
+            </Link>
+          )}
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <h1 className="text-xl font-semibold">Create Bounty</h1>
-      <p className="text-sm opacity-70">Reward is in STRK wei (1 STRK = 1e18). Metadata hash is a felt (e.g. IPFS hash as felt).</p>
-      <div className="mt-4 grid gap-3">
-        <label>
-          Reward amount (u128, wei): <input className="border px-2 py-1 w-full" value={reward} onChange={(e) => setReward(e.target.value)} />
-        </label>
-        <label>
-          Metadata hash (felt): <input className="border px-2 py-1 w-full" value={metadata} onChange={(e) => setMetadata(e.target.value)} />
-        </label>
-        <button disabled={busy} onClick={create} className="rounded bg-black px-4 py-2 text-white disabled:opacity-50">
-          {busy ? "Creating…" : "Create via Wallet"}
-        </button>
-        {txHash && (
-          <p>
-            Tx:{" "}
-            <a href={`${VERITY_NETWORKS[NETWORK].explorerUrl}/tx/${txHash}`} target="_blank" className="underline break-all">
-              {txHash}
-            </a>
-            {bountyId && <> — Bounty ID: {bountyId} — <a href={`/bounty/${bountyId}`} className="underline">View</a></>}
-          </p>
+    <main style={{ maxWidth: 560, margin: "0 auto" }}>
+      <Link href="/bounties" style={{ fontSize: 13, color: "var(--text-muted)" }}>
+        ← Back to bounties
+      </Link>
+      <h1 style={{ fontSize: 22, fontWeight: 700, margin: "16px 0 6px" }}>Create a bounty</h1>
+      <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 24px" }}>
+        Describe what you need verified. Set a reward and let the community find the truth — funding and payout stay private.
+      </p>
+
+      <div className="card card-pad" style={{ display: "grid", gap: 16 }}>
+        <div>
+          <label className="label">Bounty title *</label>
+          <input className="input" placeholder="e.g. Verify the source of this photo" value={title} onChange={(e) => setTitle(e.target.value)} />
+          <div className="help">Be specific — investigators will use this to gather evidence.</div>
+        </div>
+
+        <div>
+          <label className="label">Details</label>
+          <textarea className="textarea" rows={4} placeholder="Add context, links, and what a good submission should include…" value={description} onChange={(e) => setDescription(e.target.value)} />
+        </div>
+
+        <div>
+          <label className="label">Reward *</label>
+          <div style={{ position: "relative" }}>
+            <input className="input" placeholder="1.0" value={reward} onChange={(e) => setReward(e.target.value)} style={{ paddingRight: 60 }} />
+            <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: "var(--text-muted)", fontWeight: 600 }}>STRK</span>
+          </div>
+          <div className="help">You’ll fund this after creating. The amount is locked privately until a winner is selected.</div>
+        </div>
+
+        <div style={{ background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10, padding: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Summary</div>
+          <div style={{ display: "grid", gap: 6, fontSize: 13 }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--text-muted)" }}>Title</span>
+              <span style={{ fontWeight: 500 }}>{title || "—"}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--text-muted)" }}>Reward</span>
+              <span style={{ fontWeight: 600, color: "var(--accent)" }}>{reward || "0"} STRK</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--text-muted)" }}>Network</span>
+              <span>Sepolia</span>
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <div className="alert alert-error">
+            <span>⚠</span>
+            <div>
+              <strong>Something went wrong</strong>
+              <div style={{ opacity: 0.85, marginTop: 4 }}>{error}</div>
+            </div>
+          </div>
         )}
-        {error && <p className="text-red-600">Error: {error}</p>}
-        <p className="text-xs opacity-60">BountyManager: {CONTRACTS.bountyManager}</p>
+
+        <button disabled={busy} onClick={handleCreate} className="btn btn-primary btn-lg" style={{ width: "100%" }}>
+          {busy ? "Waiting for wallet…" : "Create bounty"}
+        </button>
+        <p style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", margin: 0 }}>
+          Your wallet will open to securely approve this. VERITY never sees your private key.
+        </p>
       </div>
     </main>
   );
