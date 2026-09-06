@@ -81,20 +81,29 @@ export default function BountiesPage() {
       }
       try {
         const provider = createProvider("sepolia");
-        const abi = [
+        // Fetch full ABI from chain so Bounty struct (bounty_manager::types::Bounty) decodes correctly.
+        // Minimal ABI with type:"Bounty" fails for V2 (returns only id) because struct is namespaced.
+        let abi: any = null;
+        try {
+          const cls: any = await provider.getClassAt(CONTRACTS.bountyManager!);
+          abi = cls.abi;
+        } catch {}
+        // Fallback minimal ABI that correctly handles V2's namespaced Bounty
+        const fallbackAbi = [
           { name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" },
-          { name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "bounty", type: "Bounty" }], stateMutability: "view" },
+          { name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ type: "bounty_manager::types::Bounty" }], stateMutability: "view" },
         ] as const;
-        const c = new Contract({ abi: abi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+        const c = new Contract({ abi: (abi || fallbackAbi) as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
         const countRes: any = await c.call("get_bounty_count", []);
         const count = Number(countRes?.count ?? countRes ?? 0);
         const list: any[] = [];
         for (let i = 1; i <= count; i++) {
           try {
             const r: any = await c.call("get_bounty", [i]);
-            const b = r?.bounty ?? r;
+            // V2 returns Bounty struct directly; V1 also. Handle both shapes.
+            const b = r?.bounty ?? (Array.isArray(r) ? { id: r[0], creator: r[1], reward_amount: r[2], status: r[3], metadata_hash: r[4], created_at: r[5], funded_amount: r[6], winner: r[7], winning_submission: r[8] } : r);
             const meta = getStoredMeta(i);
-            const fallbackTitle = feltToTitle(b?.metadata_hash ?? b?.[4]);
+            const fallbackTitle = feltToTitle((b as any)?.metadata_hash ?? (b as any)?.[4]);
             const title = meta?.title || fallbackTitle || `Bounty #${i}`;
             const description = meta?.description || "";
             list.push({ id: i, ...b, _title: title, _description: description, _meta: meta });

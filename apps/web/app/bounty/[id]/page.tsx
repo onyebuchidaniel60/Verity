@@ -123,11 +123,13 @@ export default function BountyDetailPage() {
   const walletConnected = useWalletStore((s) => s.connected);
 
   const provider = createProvider(NETWORK);
-  const bountyAbi = [
-    { name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "bounty", type: "Bounty" }], stateMutability: "view" },
+  // Use full ABI for V2 (bounty_manager::types::Bounty) — minimal "Bounty" fails for V2 (returns only id)
+  const fallbackBountyAbi = [
+    { name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ type: "bounty_manager::types::Bounty" }], stateMutability: "view" },
     { name: "get_submission_count", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" },
-    { name: "get_submission", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ name: "submission", type: "Submission" }], stateMutability: "view" },
+    { name: "get_submission", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ type: "bounty_manager::types::Submission" }], stateMutability: "view" },
   ] as const;
+  const bountyAbi: any = fallbackBountyAbi;
 
   function getStoredMeta(bountyId: number) {
     try {
@@ -152,13 +154,27 @@ export default function BountyDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      const c = new Contract({ abi: bountyAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+      // Fetch full ABI for V2 so Bounty/Submission/Report structs decode correctly; fallback to minimal if fetch fails
+      let fullAbi: any = null;
+      try {
+        const cls: any = await provider.getClassAt(CONTRACTS.bountyManager!);
+        fullAbi = cls.abi;
+      } catch {}
+      const c = new Contract({ abi: (fullAbi || bountyAbi) as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
       const r: any = await c.call("get_bounty", [id]);
-      const b = r?.bounty ?? r;
+      // Handle both object (named) and array (raw) returns: V2 returns Bounty struct directly, V1 also. Minimal ABI fallback returns array.
+      const bRaw = r?.bounty ?? r;
+      const b = Array.isArray(bRaw)
+        ? { id: bRaw[0], creator: bRaw[1], reward_amount: bRaw[2], status: bRaw[3], metadata_hash: bRaw[4], created_at: bRaw[5], funded_amount: bRaw[6], winner: bRaw[7], winning_submission: bRaw[8] }
+        : bRaw;
       setBounty(b);
-      const rewardWei = b?.reward_amount ?? b?.[2] ?? 0;
-      const rewardStr = weiToStr(rewardWei);
-      if (!fundAmount && rewardStr !== "0") setFundAmount(rewardStr);
+      const rewardWei = (b as any)?.reward_amount ?? (b as any)?.[2] ?? 0;
+      // Always use on-chain reward as authoritative; only fallback to 0 if genuinely 0, never hide bug
+      if (rewardWei !== undefined && BigInt(String(rewardWei)) !== 0n) {
+        const rewardStr = weiToStr(rewardWei);
+        if (!fundAmount) setFundAmount(rewardStr);
+        else if (fundAmount === "0" || fundAmount === "") setFundAmount(rewardStr);
+      }
       // Load submissions
       try {
         const cnt: any = await c.call("get_submission_count", [id]);
@@ -167,20 +183,26 @@ export default function BountyDetailPage() {
         for (let i = 1; i <= count; i++) {
           try {
             const s: any = await c.call("get_submission", [id, i]);
-            const sub = s?.submission ?? s;
+            const subRaw = s?.submission ?? s;
+            const sub = Array.isArray(subRaw)
+              ? { id: subRaw[0], bounty_id: subRaw[1], investigator: subRaw[2], evidence_hash: subRaw[3], timestamp: subRaw[4], status: subRaw[5] }
+              : subRaw;
             list.push({ id: i, ...sub });
           } catch {}
         }
         setSubmissions(list);
         // Load reports for dispute UI
         try {
-          const repAbi2 = [{ name: "get_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ type: "Report" }], stateMutability: "view" }] as const;
-          const cRep = new Contract({ abi: repAbi2 as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+          const repAbi2 = [{ name: "get_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ type: "bounty_manager::types::Report" }], stateMutability: "view" }] as const;
+          const cRep = new Contract({ abi: (fullAbi || repAbi2) as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
           const rMap: Record<number, any> = {};
           for (let i = 1; i <= list.length; i++) {
             try {
               const rr: any = await cRep.call("get_report", [id, i]);
-              const rep = rr?.report ?? rr;
+              const repRaw = rr?.report ?? rr;
+              const rep = Array.isArray(repRaw)
+                ? { bounty_id: repRaw[0], submission_id: repRaw[1], reporter: repRaw[2], reason: repRaw[3], evidence: repRaw[4], timestamp: repRaw[5], challenged: repRaw[6], challenge_deadline: repRaw[7], resolved: repRaw[8], slashed: repRaw[9] }
+                : repRaw;
               if (rep && (rep.reporter ?? rep[2])) rMap[i] = rep;
             } catch {}
           }
