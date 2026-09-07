@@ -7,12 +7,22 @@ import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof"
 import { CONTRACTS } from "@/lib/contracts";
 import { createProvider } from "@/lib/starknet";
 import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets } from "@/lib/bounty";
+import {
+  genesisTip, peekCreatorPreimage, buildCreateActions, saveCreator,
+  generateIdentitySeed,
+} from "@/lib/identity-pure";
+import { STRK20 } from "@/lib/strk20";
 
 const NETWORK = "sepolia" as const;
 
-// Helper set_locks ABI (direct creator call on VerityAnonymizer).
+// Helper set_locks ABI (direct call on VerityAnonymizer; creator_preimage is
+// 0 for legacy bounties, the alias preimage for private bounties).
 const SET_LOCKS_ABI = [
-  { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }, { name: "creator_preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+] as const;
+
+const SET_PAYOUT_ABI = [
+  { name: "set_payout_address", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout", type: "core::starknet::contract_address::ContractAddress" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
 ] as const;
 
 export default function CreateBountyPage() {
@@ -23,7 +33,9 @@ export default function CreateBountyPage() {
   const [busyStep, setBusyStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ hash: string; id: number | null; rewardWei: string; rewardDisplay: string; locksHash: string | null; locksError: string | null; fundSecret: string | null; refundSecret: string | null } | null>(null);
+  const [privateMode, setPrivateMode] = useState(false);
+  const [payoutAddr, setPayoutAddr] = useState("");
+  const [success, setSuccess] = useState<{ hash: string; id: number | null; rewardWei: string; rewardDisplay: string; locksHash: string | null; locksError: string | null; fundSecret: string | null; refundSecret: string | null; creatorAlias: string | null; creatorSeed: string | null } | null>(null);
 
   // Single source of truth for STRK→wei (BigInt/string-safe, never Number/1e18).
   function humanToWei(s: string): string {
@@ -111,7 +123,7 @@ export default function CreateBountyPage() {
             const fundLock = computeLock(fundSecret);
             const refundLock = computeLock(refundSecret);
             const cLocks = new Contract({ abi: SET_LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
-            const lres: any = await cLocks.invoke("set_locks", [newId, fundLock, refundLock]);
+            const lres: any = await cLocks.invoke("set_locks", [newId, fundLock, refundLock, "0x0"]);
             locksHash = lres.transaction_hash ?? lres.hash ?? "";
             if (locksHash) {
               try {
@@ -129,11 +141,11 @@ export default function CreateBountyPage() {
             fundSecret = null;
             refundSecret = null;
           }
-          setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)), locksHash, locksError, fundSecret, refundSecret });
+          setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)), locksHash, locksError, fundSecret, refundSecret, creatorAlias: null, creatorSeed: null });
           return;
         }
       } catch {}
-      setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)), locksHash: null, locksError: null, fundSecret: null, refundSecret: null });
+      setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)), locksHash: null, locksError: null, fundSecret: null, refundSecret: null, creatorAlias: null, creatorSeed: null });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("USER_REFUSED") || msg.includes("user rejected") || msg.includes("UserRejected")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
@@ -147,8 +159,123 @@ export default function CreateBountyPage() {
     }
   }
 
-  function copySecret(label: string, value: string) {
+  // Private creation: the bounty is born pool-routed under a creator alias.
+  // No creator wallet is recorded. Control auth is a per-bounty hash chain
+  // (same scheme as investigator identities); value movement binds an
+  // explicit payout address the creator chooses (refunds land there —
+  // withdraw edges are inherently public, so a fresh address is best).
+  async function handleCreatePrivate() {
+    setBusy(true);
+    setBusyStep("create");
+    setError(null);
+    setSuccess(null);
+    setCopied(null);
     try {
+      if (!title.trim()) throw new Error("Please add a bounty title");
+      if (!reward.trim()) throw new Error("Please set a reward");
+      const rewardWei = humanToWei(reward);
+      if (BigInt(rewardWei) <= 0n) throw new Error("Reward must be greater than 0");
+      const metadata = title.trim().slice(0, 31) || "Verity Bounty";
+      const metadataFelt = "0x" + Buffer.from(metadata).toString("hex").slice(0, 62) || "0x1234";
+
+      const { wallet, address } = await connectWallet();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as any });
+      const payout = (payoutAddr.trim() || address).trim();
+      if (!payout) throw new Error("No payout address available — connect your wallet.");
+
+      // Creator alias: fresh seed per bounty, genesis tip is the pseudonym.
+      const seed = generateIdentitySeed();
+      const alias = genesisTip(seed);
+      console.info("[create private] step=invoke CREATE_BOUNTY (pool-routed, no wallet in calldata)");
+      const actionArray = buildCreateActions({
+        helper: CONTRACTS.verityAnonymizer!,
+        rewardWei,
+        metadataFelt,
+        aliasHex: alias,
+      });
+      let hash = "";
+      try {
+        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        hash = res.transaction_hash ?? res.hash ?? "";
+        console.info("[create private] wallet response", res);
+      } catch (e: any) {
+        console.error("[create private] wallet_strk20InvokeTransaction error", e);
+        throw e;
+      }
+      // Read back the assigned id + verify the alias on-chain, then persist
+      // the creator seed (device-only) and bind the payout address.
+      const provider = createProvider(NETWORK);
+      if (hash) {
+        try {
+          await provider.waitForTransaction(hash, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+        } catch (w: any) {
+          console.warn("[create private] waitForTransaction warning", w?.message);
+        }
+      }
+      const c2 = new Contract({ abi: [{ name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+      const r: any = await c2.call("get_bounty_count", []);
+      const newId = Number(r?.count ?? r) || null;
+      if (!newId) throw new Error("Bounty was not assigned an ID. Check the transaction and try again.");
+      const vm = await loadBounty(provider, newId);
+      if (!vm.creatorAlias || BigInt(vm.creatorAlias).toString(16) !== BigInt(alias).toString(16)) {
+        throw new Error("On-chain alias mismatch — bounty not created as private. Nothing was stored on this device.");
+      }
+      saveCreator(newId, { seed, alias, nextK: 63 });
+      try {
+        localStorage.setItem(`verity_bounty_${newId}`, JSON.stringify({ title: title.trim(), description: description.trim(), reward, rewardWei, metadataFelt, createdAt: Date.now(), private: true }));
+        const idxRaw = localStorage.getItem("verity_bounty_index");
+        const idx = idxRaw ? JSON.parse(idxRaw) : [];
+        if (!idx.includes(newId)) {
+          idx.push(newId);
+          localStorage.setItem("verity_bounty_index", JSON.stringify(idx));
+        }
+      } catch {}
+      // Bind payout address (non-consuming setup auth) + fund/refund secrets
+      // + funding locks (non-consuming alias auth). The creator chain stays
+      // at nextK 63 until the first state-changing op (open).
+      let locksHash: string | null = null;
+      let locksError: string | null = null;
+      let fundSecret: string | null = null;
+      let refundSecret: string | null = null;
+      try {
+        setBusyStep("locks");
+        const cBM = new Contract({ abi: SET_PAYOUT_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+        const stored = { seed, alias, nextK: 63 };
+        const pres: any = await cBM.invoke("set_payout_address", [newId, payout, peekCreatorPreimage(stored)]);
+        try {
+          await provider.waitForTransaction(pres.transaction_hash ?? pres.hash, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+        } catch {}
+        fundSecret = generateSecret();
+        refundSecret = generateSecret();
+        const cLocks = new Contract({ abi: SET_LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
+        const lres: any = await cLocks.invoke("set_locks", [newId, computeLock(fundSecret), computeLock(refundSecret), peekCreatorPreimage(stored)]);
+        locksHash = lres.transaction_hash ?? lres.hash ?? "";
+        if (locksHash) {
+          try {
+            await provider.waitForTransaction(locksHash, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+          } catch {}
+        }
+        saveBountySecrets(newId, { fund_secret: fundSecret, refund_secret: refundSecret });
+      } catch (lErr: any) {
+        locksError = lErr instanceof Error ? lErr.message : String(lErr);
+        console.warn("[create private] payout/locks setup failed", lErr);
+        fundSecret = null;
+        refundSecret = null;
+      }
+      setSuccess({ hash, id: newId, rewardWei, rewardDisplay: formatRewardWei(BigInt(rewardWei)), locksHash, locksError, fundSecret, refundSecret, creatorAlias: alias, creatorSeed: seed });
+    } catch (e: any) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("USER_REFUSED") || msg.includes("user rejected") || msg.includes("UserRejected")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
+      else if (msg.includes("NOT_REGISTERED") || msg.includes("118")) setError("Your wallet isn’t registered for private transactions yet. In Ready: enable privacy/STRK20, finish private setup, and shield some STRK first — then retry.");
+      else setError(msg);
+      console.error("[create private] failed", e);
+    } finally {
+      setBusy(false);
+      setBusyStep(null);
+    }
+  }
+
+  function copySecret(label: string, value: string) {    try {
       navigator.clipboard.writeText(value).then(
         () => setCopied(label),
         () => setCopied(null),
@@ -175,7 +302,8 @@ export default function CreateBountyPage() {
           <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>Transaction</div>
           <div style={{ fontSize: 12, wordBreak: "break-all", color: "var(--text-secondary)" }}>{success.hash}</div>
           {success.id && <div style={{ marginTop: 8, fontSize: 13 }}>Bounty #{success.id} — Status: CREATED — <Link href={`/bounty/${success.id}`} className="underline" style={{ color: "var(--accent)" }}>Fund it privately →</Link></div>}
-          {success.locksHash && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Funding locks: SET — only this wallet can fund this bounty.</div>}
+          {success.creatorAlias && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Anonymous creator identity registered — your wallet was never recorded.</div>}
+          {success.locksHash && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Funding locks: SET — {success.creatorAlias ? "only the funding-secret holder can fund this bounty." : "only this wallet can fund this bounty."}</div>}
           {success.locksError && (
             <div className="alert alert-error" style={{ marginTop: 8 }}>
               <span>⚠</span>
@@ -186,24 +314,26 @@ export default function CreateBountyPage() {
             </div>
           )}
         </div>
-        {success.fundSecret && success.refundSecret && (
+        {((success.fundSecret && success.refundSecret) || success.creatorSeed) && (
           <div className="card card-pad" style={{ textAlign: "left", marginBottom: 16, borderColor: "var(--amber-border)" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Back up your funding secrets — once</div>
-            <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: "0 0 12px", lineHeight: 1.5 }}>
-              These authorize funding and refunds for this bounty. They are stored on this device only.
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Back up your funding secrets — once</div>            <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: "0 0 12px", lineHeight: 1.5 }}>
+              These authorize funding, refunds{success.creatorSeed ? ", and control of this bounty" : ""} for this bounty. They are stored on this device only.
               Anyone with the refund secret can trigger a refund to you — keep them private.
             </p>
             {(
               [
                 ["Funding secret", success.fundSecret],
                 ["Refund secret", success.refundSecret],
-              ] as Array<[string, string]>
-            ).map(([label, value]) => (
+                ["Creator identity seed (controls this bounty)", success.creatorSeed],
+              ] as Array<[string, string | null]>
+            )
+              .filter(([, v]) => !!v)
+              .map(([label, value]) => (
               <div key={label} style={{ marginBottom: 10 }}>
                 <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>{label}</div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <code style={{ flex: 1, fontSize: 11, wordBreak: "break-all", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>{value}</code>
-                  <button type="button" className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => copySecret(label, value)}>
+                  <code style={{ flex: 1, fontSize: 11, wordBreak: "break-all", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>{value ?? ""}</code>
+                  <button type="button" className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => copySecret(label, value ?? "")}>
                     {copied === label ? "Copied ✓" : "Copy"}
                   </button>
                 </div>
@@ -256,6 +386,20 @@ export default function CreateBountyPage() {
           <div className="help">You’ll fund this after creating. The amount is locked privately until a winner is selected.</div>
         </div>
 
+        <div>
+          <label className="label">Refund address (private bounties)</label>
+          <input className="input" placeholder="Defaults to your wallet" value={payoutAddr} onChange={(e) => setPayoutAddr(e.target.value)} style={{ fontFamily: "Fragment Mono", fontSize: 12 }} disabled={!privateMode} />
+          <div className="help">Refunds land here on a public transfer — use a fresh address for full privacy. Only needed for private bounties.</div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10, padding: 12 }}>
+          <input id="private-create" type="checkbox" checked={privateMode} onChange={(e) => setPrivateMode(e.target.checked)} style={{ marginTop: 3 }} />
+          <label htmlFor="private-create" style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text-secondary)" }}>
+            <strong style={{ color: "var(--text)" }}>Create as an anonymous creator.</strong> Your wallet is never recorded —
+            control is proven with a private identity instead. Uses one private transaction (a small privacy fee applies).
+          </label>
+        </div>
+
         <div style={{ background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10, padding: 16 }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Summary</div>
           <div style={{ display: "grid", gap: 6, fontSize: 13 }}>
@@ -284,8 +428,8 @@ export default function CreateBountyPage() {
           </div>
         )}
 
-        <button disabled={busy} onClick={handleCreate} className="btn btn-primary btn-lg" style={{ width: "100%" }}>
-          {busy ? (busyStep === "locks" ? "Setting funding locks…" : "Waiting for wallet…") : "Create bounty"}
+        <button disabled={busy} onClick={privateMode ? handleCreatePrivate : handleCreate} className="btn btn-primary btn-lg" style={{ width: "100%" }}>
+          {busy ? (busyStep === "locks" ? "Setting funding locks…" : "Waiting for wallet…") : privateMode ? "Create bounty privately" : "Create bounty"}
         </button>
         <p style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", margin: 0 }}>
           Your wallet will open to securely approve this. VERITY never sees your private key.

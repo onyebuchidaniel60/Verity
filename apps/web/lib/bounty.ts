@@ -22,7 +22,7 @@ export async function loadBounty(provider: RpcProvider, id: number): Promise<Bou
   const c = new Contract({ abi: (fullAbi || fallbackAbi) as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
   const r: any = await c.call("get_bounty", [id]);
   const bRaw = r;
-  const b = Array.isArray(bRaw) ? { id: bRaw[0], creator: bRaw[1], reward_amount: bRaw[2], status: bRaw[3], metadata_hash: bRaw[4], created_at: bRaw[5], funded_amount: bRaw[6], winner: bRaw[7], winning_submission: bRaw[8] } : bRaw;
+  const b = Array.isArray(bRaw) ? { id: bRaw[0], creator: bRaw[1], reward_amount: bRaw[2], status: bRaw[3], metadata_hash: bRaw[4], created_at: bRaw[5], funded_amount: bRaw[6], winner: bRaw[7], winning_submission: bRaw[8], creator_alias: bRaw[9], payout_address: bRaw[10] } : bRaw;
   // Also handle case where b is already the struct (with named fields) — it will have id, creator, etc.
   const idNum = Number(b.id ?? id);
   const creator = String(b.creator ?? b[1] ?? "0x0");
@@ -34,6 +34,17 @@ export async function loadBounty(provider: RpcProvider, id: number): Promise<Bou
   const winnerRaw = b.winner ?? b[7] ?? "0x0";
   const winner = String(winnerRaw) === "0x0" || String(winnerRaw) === "0" ? null : String(winnerRaw);
   const winningSubmission = b.winning_submission !== undefined && b.winning_submission !== null ? Number(b.winning_submission) : (b[8] !== undefined ? Number(b[8]) : null);
+  // Creator alias: nonzero felt = private bounty. Zero/absent = legacy.
+  const aliasRaw = b.creator_alias ?? b[9] ?? null;
+  let creatorAlias: string | null = null;
+  try {
+    if (aliasRaw !== null && aliasRaw !== undefined && BigInt(String(aliasRaw)) !== 0n) creatorAlias = String(aliasRaw);
+  } catch {}
+  const payoutRaw = b.payout_address ?? b[10] ?? null;
+  let payoutAddress: string | null = null;
+  try {
+    if (payoutRaw !== null && payoutRaw !== undefined && BigInt(String(payoutRaw)) !== 0n) payoutAddress = String(payoutRaw);
+  } catch {}
   // Title/description from localStorage (presentation only, not authoritative for reward/status)
   let title = `Bounty #${idNum}`;
   let description = "";
@@ -74,6 +85,8 @@ export async function loadBounty(provider: RpcProvider, id: number): Promise<Bou
     fundedAmountWei,
     winner,
     winningSubmission,
+    creatorAlias,
+    payoutAddress,
     title,
     description,
   };

@@ -15,7 +15,9 @@ import {
   genesisTip, peekPreimage, consumePreimage, identityShortId, normFelt,
   generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity,
   evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
-  buildUnstakeActions, type StoredIdentity,
+  buildUnstakeActions, submitGate,
+  peekCreatorPreimage, consumeCreatorPreimage, loadCreator, saveCreator,
+  type StoredIdentity, type StoredCreator,
 } from "@/lib/identity-pure";
 
 const NETWORK = "sepolia" as const;
@@ -38,8 +40,17 @@ const IDENTITY_ABI = [
   { name: "get_stake_amount", type: "function", inputs: [], outputs: [{ name: "amt", type: "core::integer::u128" }], stateMutability: "view" },
   { name: "challenge_private_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
 ] as const;
+
+// Private creator control entries (alias bounties only; preimage auth).
+const CREATOR_ABI = [
+  { name: "set_payout_address", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout", type: "core::starknet::contract_address::ContractAddress" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "open_bounty_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "select_winner_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "report_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "reason", type: "core::felt252" }, { name: "evidence", type: "core::felt252" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "resolve_report_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "should_slash", type: "core::bool" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+] as const;
 const LOCKS_ABI = [
-  { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }, { name: "creator_preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
   { name: "register_payout_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
   { name: "has_fund_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "has", type: "core::bool" }], stateMutability: "view" },
   { name: "has_refund_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "has", type: "core::bool" }], stateMutability: "view" },
@@ -108,8 +119,13 @@ export default function BountyDetailPage() {
   // Private investigator identity (device-held seed; chain state is the source
   // of truth for eligibility — localStorage only holds the secret seed).
   const [storedIdentity, setStoredIdentity] = useState<StoredIdentity | null>(null);
+  const [eligibilityLoaded, setEligibilityLoaded] = useState(false);
+  // Private creator identity for THIS bounty (device-held seed; null for
+  // legacy bounties or when this device is not the creator).
+  const [storedCreator, setStoredCreator] = useState<StoredCreator | null>(null);
   const [identityInfo, setIdentityInfo] = useState<{ identity: string; registered: boolean; reputation: number; minRep: number; escrowWei: bigint; eligible: boolean; slashed: boolean; stakeAmountWei: bigint } | null>(null);
   const [reportReason, setReportReason] = useState("");
+  const [payoutAddrInput, setPayoutAddrInput] = useState("");
   const [selectedSubmission, setSelectedSubmission] = useState<number | null>(null);
   const [reportsMap, setReportsMap] = useState<Record<number, any>>({});
 
@@ -147,6 +163,7 @@ export default function BountyDetailPage() {
 
   async function load() {
     setLoading(true);
+    setEligibilityLoaded(false);
     setError(null);
     try {
       const vm = await loadBounty(provider, id);
@@ -275,6 +292,16 @@ export default function BountyDetailPage() {
       } catch {
         setIdentityInfo(null);
       }
+      // Eligibility reads (legacy + private) attempted above — chain is the
+      // only source of staked-ness. Submit stays disabled until this is set.
+      setEligibilityLoaded(true);
+      // Private creator seed for this bounty (device-only; alias match
+      // against chain decides creator control — never the wallet).
+      try {
+        setStoredCreator(loadCreator(Number(id)));
+      } catch {
+        setStoredCreator(null);
+      }
       try {
         const cLocks: any = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: provider });
         const [hasFund, hasRefund, hasPayout, escrow]: any = await Promise.all([
@@ -391,7 +418,7 @@ export default function BountyDetailPage() {
         });
       } catch {}
       if (rawMsg.includes("USER_REFUSED") || msgLower.includes("user rejected") || msgLower.includes("cancelled")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
-      else if (msgLower.includes("not_registered") || msgLower.includes("118")) setError("Your wallet isn’t registered for private transactions yet. Open your wallet, enable private mode, and try again.");
+      else if (msgLower.includes("not_registered") || msgLower.includes("118")) setError("Your wallet isn’t registered for private transactions yet. In Ready: enable privacy/STRK20, finish private setup, and shield some STRK first — then retry. (Private staking also needs the new Verity contracts, which are still being deployed.)");
       else if (msgLower.includes("insufficient") || msgLower.includes("balance") || msgLower.includes("insufficient_private_balance")) setError("Insufficient funds. Make sure you have enough STRK and try again.");
       else if (msgLower.includes("not_staked")) setError("You need to stake before you can submit. Stake privately to create your investigator identity, then submit.");
       else if (msgLower.includes("not_registered_identity") || msgLower.includes("unknown_preimage")) setError("Investigator identity not recognized. Stake privately first on this device.");
@@ -404,6 +431,13 @@ export default function BountyDetailPage() {
       else if (msgLower.includes("already_challenged")) setError("This report has already been challenged.");
       else if (msgLower.includes("challenge_expired")) setError("The 3-day challenge window has closed.");
       else if (msgLower.includes("identity_zero")) setError("Invalid investigator identity. Reload and try again.");
+      else if (msgLower.includes("not_alias_bounty")) setError("This action is only for anonymous-creator bounties.");
+      else if (msgLower.includes("alias_zero") || msgLower.includes("metadata_zero")) setError("Invalid creation details. Reload and try again.");
+      else if (msgLower.includes("use_private_submit")) setError("This bounty accepts only private submissions from staked investigator identities.");
+      else if (msgLower.includes("payout_zero")) setError("Please enter a valid refund address.");
+      else if (msgLower.includes("preimage_not_needed")) setError("Unexpected authorization payload. Reload and try again.");
+      else if (msgLower.includes("not_registered_creator")) setError("Creator identity not recognized on-chain.");
+      else if (msgLower.includes("not_authorized") && !msgLower.includes("not_authorized_claim")) setError("You are not authorized for this action.");
       else if (msgLower.includes("invalid_op")) setError("Private staking isn’t live on this deployment yet — the new contracts are still being deployed. Basic staking below still works.");
       else if (msgLower.includes("bounty_must_be_zero") || msgLower.includes("amount_must_be_zero")) setError("Invalid private-transaction payload. Please reload and try again.");
       else if (msgLower.includes("is_slashed")) setError("Your investigator profile has been slashed and can’t submit. Contact support if you believe this is an error.");
@@ -458,8 +492,16 @@ export default function BountyDetailPage() {
       if (!secrets) secrets = { fund_secret: generateSecret(), refund_secret: generateSecret() };
       const fundLock = computeLock(secrets.fund_secret);
       const refundLock = computeLock(secrets.refund_secret);
+      // Alias bounties authorize locks with a creator preimage (non-consuming
+      // setup auth — the chain does not advance); legacy passes 0.
+      let creatorPreimage = "0x0";
+      if (isPrivateBounty) {
+        const cc = loadCreator(Number(id));
+        if (!cc) throw new Error("Creator identity not found on this device — set locks from the device that created this bounty.");
+        creatorPreimage = peekCreatorPreimage(cc);
+      }
       const c = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
-      const res: any = await c.invoke("set_locks", [id, fundLock, refundLock]);
+      const res: any = await c.invoke("set_locks", [id, fundLock, refundLock, creatorPreimage]);
       saveBountySecrets(Number(id), secrets);
       return res.transaction_hash ?? res.hash;
     });
@@ -649,6 +691,117 @@ export default function BountyDetailPage() {
       return res.transaction_hash ?? res.hash;
     });
 
+  // ---- Private creator control (alias bounties only) ----
+  // Each op consumes one creator-chain preimage AFTER L2 confirmation (the
+  // local chain advances only then, so a reverted tx never desyncs this
+  // device). Direct calls from any account: preimage knowledge is the auth.
+
+  function requireCreatorSeed(): StoredCreator {
+    const cc = loadCreator(Number(id));
+    if (!cc) throw new Error("Creator identity not found on this device — control this bounty from the device that created it.");
+    return cc;
+  }
+
+  async function invokeCreatorPrivate(entry: string, args: (string | number | boolean)[], busyKey: string): Promise<string> {
+    const cc = requireCreatorSeed();
+    const { wallet } = await connectWallet();
+    await ensureConnected();
+    const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+    const preimage = peekCreatorPreimage(cc);
+    const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+    const res: any = await c.invoke(entry, [...args, preimage]);
+    const h = res.transaction_hash ?? res.hash;
+    if (h) {
+      try {
+        await provider.waitForTransaction(h as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+      } catch (w: any) {
+        console.warn(`[bounty ${id}] ${busyKey} waitForTransaction warning`, w?.message);
+        throw w;
+      }
+      const { next } = consumeCreatorPreimage(cc);
+      saveCreator(Number(id), next);
+      setStoredCreator(next);
+    }
+    return h;
+  }
+
+  const openPrivate = () => guard("open", () => invokeCreatorPrivate("open_bounty_private", [id], "open"));
+
+  const selectWinnerPrivate = (submissionId: number) =>
+    guard("select", () => invokeCreatorPrivate("select_winner_private", [id, submissionId], "select"));
+
+  const reportPrivate = (submissionId: number) =>
+    guard("report", async () => {
+      if (!reportReason.trim()) throw new Error("Please provide a reason for the report");
+      const cc = requireCreatorSeed();
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const reasonFelt = "0x" + Buffer.from(reportReason.trim().slice(0, 31)).toString("hex");
+      const evidenceFelt = "0x" + Buffer.from("report-evidence").toString("hex");
+      const preimage = peekCreatorPreimage(cc);
+      const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("report_private", [id, submissionId, reasonFelt, evidenceFelt, preimage]);
+      const h = res.transaction_hash ?? res.hash;
+      if (h) {
+        try {
+          await provider.waitForTransaction(h as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+        } catch (w: any) {
+          console.warn(`[bounty ${id}] report waitForTransaction warning`, w?.message);
+          throw w;
+        }
+        const { next } = consumeCreatorPreimage(cc);
+        saveCreator(Number(id), next);
+        setStoredCreator(next);
+      }
+      return h;
+    });
+
+  const resolvePrivate = (submissionId: number, shouldSlash: boolean) =>
+    guard("resolve", async () => {
+      const cc = requireCreatorSeed();
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      // Unchallenged alias reports: creator resolves after the window with a
+      // preimage; challenged ones go through owner arbitration (legacy
+      // resolve entry demoed via owner wallet). Peek only — consume only when
+      // this device actually authorizes.
+      const r = reportsMap[Number(submissionId)] as any;
+      const challenged = !!(r?.challenged ?? r?.[6]);
+      if (challenged) throw new Error("Challenged reports resolve through owner arbitration.");
+      const preimage = peekCreatorPreimage(cc);
+      const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("resolve_report_private", [id, submissionId, shouldSlash, preimage]);
+      const h = res.transaction_hash ?? res.hash;
+      if (h) {
+        try {
+          await provider.waitForTransaction(h as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+        } catch (w: any) {
+          console.warn(`[bounty ${id}] resolve waitForTransaction warning`, w?.message);
+          throw w;
+        }
+        const { next } = consumeCreatorPreimage(cc);
+        saveCreator(Number(id), next);
+        setStoredCreator(next);
+      }
+      return h;
+    });
+
+  const setPayoutAddress = (payout: string) =>
+    guard("payout", async () => {
+      if (!payout.trim()) throw new Error("Please enter a refund address");
+      const cc = requireCreatorSeed();
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      // Non-consuming setup auth: the chain does not advance.
+      const preimage = peekCreatorPreimage(cc);
+      const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("set_payout_address", [id, payout.trim(), preimage]);
+      return res.transaction_hash ?? res.hash;
+    });
+
   const withdrawStake = () =>
     guard("withdraw", async () => {
       const { wallet } = await connectWallet();
@@ -676,6 +829,10 @@ export default function BountyDetailPage() {
       const amtRes: any = await cId.call("get_stake_amount", []);
       const stakeWei = BigInt(amtRes?.amt ?? amtRes ?? 0).toString();
       if (BigInt(stakeWei) <= 0n) throw new Error("STAKE_ZERO: no stake amount configured.");
+      // Step 1 — wallet-side shielded balance read. Throws NOT_REGISTERED
+      // (118) when this account never completed STRK20 onboarding; that is a
+      // wallet/pool registration state, not a Verity state. Rethrown as-is.
+      console.info("[stakePrivate] step=balances token", STRK20[NETWORK].strkTokenAddress);
       try {
         const balances: any = await account.strk20Balances([STRK20[NETWORK].strkTokenAddress as Address]);
         const entry = (balances as any[]).find((b: any) => String(b.token).toLowerCase() === STRK20[NETWORK].strkTokenAddress.toLowerCase());
@@ -696,6 +853,10 @@ export default function BountyDetailPage() {
         { type: "withdraw", amount: stakeWei, recipient: CONTRACTS.verityAnonymizer },
         { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: ["STAKE_IDENTITY", "0x0", stakeWei, "<nonce>", "0x0", "<identity-commitment>"] },
       ]));
+      // Step 2 — private transaction. The payload below was validated
+      // against the installed Wallet API 0.10.3 schema (withdraw + invoke,
+      // all-0x-felts). A NOT_REGISTERED here is the same wallet-side gate.
+      console.info("[stakePrivate] step=invoke actions=2 [withdraw stake→helper, invoke STAKE_IDENTITY]");
       try {
         const res: any = await account.strk20InvokeTransaction(actionArray as any);
         const h = res.transaction_hash ?? res.hash;
@@ -982,7 +1143,19 @@ export default function BountyDetailPage() {
   const normCreator = normalizeAddr(creatorAddr);
   const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
   const normWinner = normalizeAddr(winnerAddr);
-  const isCreator = isCreatorAddr(creatorAddr, connectedAddr);
+  const isCreatorLegacy = isCreatorAddr(creatorAddr, connectedAddr);
+  // Private creator match: chain alias vs device seed (never the wallet).
+  // On alias bounties the recorded "creator" is a commitment cast, so the
+  // legacy wallet comparison above is always false there by construction.
+  const creatorAlias = (bounty as any)?.creatorAlias ?? null;
+  const isPrivateBounty = !!creatorAlias;
+  const isCreatorPrivate = !!(
+    isPrivateBounty && storedCreator &&
+    normFelt(storedCreator.alias)?.toLowerCase() === normFelt(String(creatorAlias))?.toLowerCase()
+  );
+  // Combined creator control (legacy wallet OR alias seed). Every creator
+  // action below branches on isPrivateBounty for the correct auth path.
+  const isCreator = isCreatorLegacy || isCreatorPrivate;
   const isWinner = !!(normWinner && normConnected && normWinner === normConnected && normWinner !== "0x0000000000000000000000000000000000000000000000000000000000000000");
   // Private win detection: the winning submission carries an identity
   // commitment (never a wallet). The local device matches by identity, not
@@ -1042,6 +1215,19 @@ export default function BountyDetailPage() {
       }
     : null;
 
+  // Submit gate — chain reads ONLY (never localStorage, never popup success).
+  // Private identity first, legacy public stake second. The wallet must never
+  // open when neither path is eligible: the contract would reject with
+  // NOT_STAKED and the user would sign a doomed transaction.
+  const legacyEligible = eligibility?.eligible ?? false;
+  const privateEligible = identityInfo?.eligible ?? false;
+  // Single rule for the submit button (chain reads only — see submitGate).
+  const gateState = submitGate({ loaded: eligibilityLoaded, privateEligible, legacyEligible });
+  const submitEligible = gateState === "eligible";
+  const stakeAmountLabel = identityInfo?.stakeAmountWei && identityInfo.stakeAmountWei > 0n
+    ? formatReward(identityInfo.stakeAmountWei.toString())
+    : (eligibility?.stakeAmountStr ?? "1 STRK");
+
   return (
     <main>
       <Link href="/bounties" style={{ fontSize: 13, color: "var(--text-muted)" }}>
@@ -1079,7 +1265,11 @@ export default function BountyDetailPage() {
           <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
               <span style={{ color: "var(--text-muted)" }}>Creator</span>
-              <span style={{ fontFamily: "Fragment Mono", fontSize: 12 }}>{shortAddr(creatorHex)} {isCreator && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
+              {isPrivateBounty && creatorAlias ? (
+                <span style={{ fontSize: 12 }}>Anonymous Creator {identityShortId(String(creatorAlias))} {isCreatorPrivate && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
+              ) : (
+                <span style={{ fontFamily: "Fragment Mono", fontSize: 12 }}>{shortAddr(creatorHex)} {isCreator && <span style={{ color: "var(--accent)", fontWeight: 600 }}>(you)</span>}</span>
+              )}
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "var(--text-muted)" }}>Created</span>
@@ -1216,11 +1406,31 @@ export default function BountyDetailPage() {
               <div style={{ fontSize: 13, fontWeight: 600 }}>Set funding locks</div>
               <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
                 Before this bounty can be funded, commit the funding locks (one transaction).
-                This binds funding authorization to your wallet — only you will be able to fund it.
+                {isPrivateBounty ? " This authorizes funding for your anonymous creator identity — no wallet is linked." : " This binds funding authorization to your wallet — only you will be able to fund it."}
                 New secrets are generated on this device and backed up to you if none exist yet.
               </p>
               <button disabled={!!busy} onClick={setLocks} className="btn btn-primary">
                 {busy === "locks" ? "Setting locks…" : "Set funding locks"}
+              </button>
+            </div>
+          )}
+          {isPrivateBounty && isCreatorPrivate && !(bounty as any)?.payoutAddress && (
+            <div style={{ display: "grid", gap: 10, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--amber-border)", borderRadius: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Set refund address</div>
+              <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
+                Refunds move on a public transfer, so they need a plain address. Enter one you control —
+                a fresh address keeps this bounty unlinkable to your other activity. Required before funding.
+              </p>
+              <input
+                className="input"
+                placeholder="0x… refund address"
+                value={payoutAddrInput}
+                onChange={(e) => setPayoutAddrInput(e.target.value)}
+                style={{ fontFamily: "Fragment Mono", fontSize: 12 }}
+                spellCheck={false}
+              />
+              <button disabled={!!busy} onClick={() => setPayoutAddress(payoutAddrInput)} className="btn btn-secondary">
+                {busy === "payout" ? "Setting…" : "Set refund address"}
               </button>
             </div>
           )}
@@ -1266,7 +1476,7 @@ export default function BountyDetailPage() {
           )}
           {isFunded && isCreator && (
             <div style={{ display: "grid", gap: 10 }}>
-              <button disabled={!!busy} onClick={open} className="btn btn-primary">
+              <button disabled={!!busy} onClick={isPrivateBounty ? openPrivate : open} className="btn btn-primary">
                 {busy === "open" ? "Processing…" : "Open bounty"}
               </button>
               <div style={{ display: "grid", gap: 8, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
@@ -1290,12 +1500,32 @@ export default function BountyDetailPage() {
               <label className="label" htmlFor="evidence">Your investigation</label>
               <textarea id="evidence" className="textarea" rows={4} placeholder="Describe your findings…" value={evidence} onChange={(e) => setEvidence(e.target.value)} />
               <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>I understand that submitting a fraudulent or misleading investigation may result in loss of my stake.</p>
-              {identityInfo?.eligible && (
+              {privateEligible && identityInfo && (
                 <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>Submitting as Anonymous {identityShortId(identityInfo.identity)} — your wallet stays private.</p>
               )}
-              <button disabled={!!busy} onClick={identityInfo?.eligible ? submitPrivate : submit} className="btn btn-primary">
-                {busy === "submitPrivate" ? "Submitting privately…" : busy === "submit" ? "Submitting…" : identityInfo?.eligible ? "Submit investigation privately" : "Submit investigation"}
-              </button>
+              {!eligibilityLoaded || gateState === "loading" ? (
+                <button disabled className="btn btn-primary">Checking eligibility…</button>
+              ) : submitEligible ? (
+                <button disabled={!!busy} onClick={privateEligible ? submitPrivate : submit} className="btn btn-primary">
+                  {busy === "submitPrivate" ? "Submitting privately…" : busy === "submit" ? "Submitting…" : privateEligible ? "Submit investigation privately" : "Submit investigation"}
+                </button>
+              ) : (
+                <>
+                  <div className="alert alert-warn" style={{ margin: 0 }}>
+                    <span>◈</span>
+                    <div>
+                      <strong>Private stake required</strong>
+                      <div style={{ opacity: 0.85, marginTop: 4 }}>Stake {stakeAmountLabel} to become eligible. Submission unlocks only after your stake is confirmed on-chain.</div>
+                    </div>
+                  </div>
+                  <button disabled={!!busy} onClick={stakePrivate} className="btn btn-primary">
+                    {busy === "stakePrivate" ? "Confirm in wallet…" : "Stake Privately"}
+                  </button>
+                  <button disabled className="btn btn-secondary" title="Stake first — the contract rejects unstaked submissions">
+                    Submit Investigation
+                  </button>
+                </>
+              )}
               {!connectedAddr && <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Connect your wallet to submit.</div>}
             </div>
           )}
@@ -1436,7 +1666,7 @@ export default function BountyDetailPage() {
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                     {isCreator && isOpen && statusLabel === "Pending" && (
                       <>
-                        <button disabled={!!busy} onClick={() => selectWinner(Number(s.id))} className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12 }}>
+                        <button disabled={!!busy} onClick={() => (isPrivateBounty ? selectWinnerPrivate(Number(s.id)) : selectWinner(Number(s.id)))} className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12 }}>
                           {busy === "select" && selectedSubmission === Number(s.id) ? "Selecting…" : "Select winner"}
                         </button>
                         <button
@@ -1445,7 +1675,7 @@ export default function BountyDetailPage() {
                             const reason = prompt("Reason for reporting this investigation (will be recorded on-chain, investigator can challenge within 3 days):");
                             if (reason) {
                               setReportReason(reason);
-                              setTimeout(() => report(Number(s.id)), 100);
+                              setTimeout(() => (isPrivateBounty ? reportPrivate(Number(s.id)) : report(Number(s.id))), 100);
                             }
                           }}
                           className="btn btn-secondary"
@@ -1462,10 +1692,10 @@ export default function BountyDetailPage() {
                     )}
                     {statusLabel === "Reported" && (isCreator || connectedAddr === "0x100") && (
                       <>
-                        <button disabled={!!busy} onClick={() => resolve(Number(s.id), true)} className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12, background: "var(--red)", borderColor: "var(--red)", color: "#fff" }}>
+                        <button disabled={!!busy} onClick={() => (isPrivateBounty ? resolvePrivate(Number(s.id), true) : resolve(Number(s.id), true))} className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12, background: "var(--red)", borderColor: "var(--red)", color: "#fff" }}>
                           {busy === "resolve" ? "Resolving…" : "Confirm slash"}
                         </button>
-                        <button disabled={!!busy} onClick={() => resolve(Number(s.id), false)} className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12 }}>
+                        <button disabled={!!busy} onClick={() => (isPrivateBounty ? resolvePrivate(Number(s.id), false) : resolve(Number(s.id), false))} className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12 }}>
                           Dismiss report
                         </button>
                       </>

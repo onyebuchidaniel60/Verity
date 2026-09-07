@@ -23,6 +23,7 @@ export const OP_STAKE = "0x5354414b455f4944454e54495459"; // 'STAKE_IDENTITY'
 export const OP_SUBMIT = "0x5355424d49545f50524956415445"; // 'SUBMIT_PRIVATE'
 export const OP_REG_PAYOUT = "0x52454749535445525f5041594f5554"; // 'REGISTER_PAYOUT'
 export const OP_UNSTAKE = "0x554e5354414b455f4944454e54495459"; // 'UNSTAKE_IDENTITY'
+export const OP_CREATE = "0x4352454154455f424f554e5459"; // 'CREATE_BOUNTY'
 
 const STARK_PRIME = 2n ** 251n + 17n * 2n ** 192n + 1n;
 
@@ -234,6 +235,22 @@ export function buildUnstakeActions(opts: {
   ];
 }
 
+/** Submit-gate decision from CHAIN-READ eligibility only.
+ *  - 'loading': reads pending → wallet must not open.
+ *  - 'eligible': private identity OR legacy stake path passes.
+ *  - 'blocked': reads done, neither path passes → show stake CTA, keep
+ *    Submit disabled (the contract would reject with NOT_STAKED).
+ *  Never consults localStorage or popup outcomes. */
+export function submitGate(opts: {
+  loaded: boolean;
+  privateEligible: boolean;
+  legacyEligible: boolean;
+}): "loading" | "eligible" | "blocked" {
+  if (!opts.loaded) return "loading";
+  if (opts.privateEligible || opts.legacyEligible) return "eligible";
+  return "blocked";
+}
+
 /** Verify at runtime that the pinned op constants match short-string encoding. */
 export function verifyOpConstants(): Record<string, boolean> {
   const enc = (s: string) => "0x" + BigInt(shortString.encodeShortString(s)).toString(16);
@@ -242,5 +259,81 @@ export function verifyOpConstants(): Record<string, boolean> {
     SUBMIT_PRIVATE: enc("SUBMIT_PRIVATE") === OP_SUBMIT.toLowerCase(),
     REGISTER_PAYOUT: enc("REGISTER_PAYOUT") === OP_REG_PAYOUT.toLowerCase(),
     UNSTAKE_IDENTITY: enc("UNSTAKE_IDENTITY") === OP_UNSTAKE.toLowerCase(),
+    CREATE_BOUNTY: enc("CREATE_BOUNTY") === OP_CREATE.toLowerCase(),
   };
+}
+
+// ---- Private creator identity (same hash-chain scheme, own namespace) -----
+// Creator control auth per bounty; no reputation attached. Stored per bounty
+// (`verity_creator_<id>`): { seed, alias, nextK }. The alias (genesis tip) is
+// the stable pseudonym shown as "Anonymous Creator #xxxx".
+
+export interface StoredCreator {
+  seed: string;
+  alias: string;
+  nextK: number;
+}
+
+function creatorKey(id: number): string {
+  return `verity_creator_${id}`;
+}
+
+export function saveCreator(id: number, s: StoredCreator): void {
+  try {
+    localStorage.setItem(creatorKey(id), JSON.stringify(s));
+  } catch {}
+}
+
+export function loadCreator(id: number): StoredCreator | null {
+  try {
+    const raw = localStorage.getItem(creatorKey(id));
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (typeof p?.seed !== "string" || typeof p?.alias !== "string") return null;
+    if (!Number.isInteger(p?.nextK)) return null;
+    if (normFelt(p.alias)?.toLowerCase() !== genesisTip(p.seed).toLowerCase()) return null;
+    return { seed: p.seed, alias: p.alias, nextK: p.nextK };
+  } catch {
+    return null;
+  }
+}
+
+/** Peek at the next creator preimage without consuming. */
+export function peekCreatorPreimage(s: StoredCreator): string {
+  if (s.nextK < 0) throw new Error("Creator chain exhausted for this bounty.");
+  return chainAt(s.seed, s.nextK);
+}
+
+/** Consume the next creator preimage. Call ONLY after confirmation. */
+export function consumeCreatorPreimage(s: StoredCreator): { preimage: string; next: StoredCreator } {
+  if (s.nextK < 0) throw new Error("Creator chain exhausted for this bounty.");
+  const preimage = chainAt(s.seed, s.nextK);
+  return { preimage, next: { ...s, nextK: s.nextK - 1 } };
+}
+
+/** CREATE: bare pool-routed invoke (no value leg).
+ *  privacy_invoke(CREATE_BOUNTY, bounty_id=0, amount=reward, nonce,
+ *                 note_id=metadata_hash, secret=creator_alias). */
+export function buildCreateActions(opts: {
+  helper: string;
+  rewardWei: string;
+  metadataFelt: string;
+  aliasHex: string;
+  nonceHex?: string;
+}): Strk20Action[] {
+  const nonce = opts.nonceHex ?? randomNonceHex();
+  return [
+    {
+      type: "invoke",
+      contract: opts.helper,
+      calldata: [
+        OP_CREATE,
+        "0x0",
+        toFeltHex(BigInt(opts.rewardWei)),
+        nonce,
+        toFeltHex(BigInt(opts.metadataFelt)),
+        toFeltHex(BigInt(opts.aliasHex)),
+      ],
+    },
+  ];
 }

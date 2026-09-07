@@ -37,6 +37,15 @@ function shortAddr(a: string) {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
+function anonShortId(v: string): string {
+  try {
+    const hex = BigInt(v).toString(16).padStart(64, "0");
+    return `#${hex.slice(-4).toUpperCase()}`;
+  } catch {
+    return "#????";
+  }
+}
+
 export default function BountiesPage() {
   const [bounties, setBounties] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -126,6 +135,9 @@ export default function BountiesPage() {
             const excerpt = desc ? (desc.length > 110 ? desc.slice(0, 110) + "…" : desc) : "Investigation bounty — evidence helps verify the claim.";
             const reward = b.rewardStr as string;
             const creator = String(b.creator ?? "");
+            // Alias bounties never show an address: the pseudonym only.
+            const alias = (b as any).creatorAlias ?? null;
+            const byline = alias ? `By Anonymous ${anonShortId(String(alias))}` : (shortAddr(creator) ? `By ${shortAddr(creator)}` : "");
             const createdAt = b.createdAt ? new Date(Number(b.createdAt) * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
             return (
               <Link key={id} href={`/bounty/${id}`} className="card card-pad card-hover" style={{ display: "block" }}>
@@ -137,7 +149,7 @@ export default function BountiesPage() {
                 <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 12px", lineHeight: 1.55 }}>{excerpt}</p>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", borderTop: "1px solid var(--border)", paddingTop: 12, marginTop: 4 }}>
                   <div style={{ display: "flex", gap: 10, fontSize: 12, color: "var(--text-muted)", alignItems: "center" }}>
-                    <span>{shortAddr(creator) ? `By ${shortAddr(creator)}` : ""}</span>
+                    <span>{byline}</span>
                     {createdAt && (
                       <>
                         <span style={{ opacity: 0.4 }}>•</span>

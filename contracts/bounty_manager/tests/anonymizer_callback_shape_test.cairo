@@ -163,3 +163,36 @@ fn test_helper_identity_call_shapes_against_real_bounty_manager() {
     stop_cheat_caller_address(bm_addr);
     assert(resolved == identity, 'resolve mismatch');
 }
+
+#[test]
+fn test_helper_creator_call_shapes_against_real_bounty_manager() {
+    // Creator chain, seed 0xc4e4 (same generation as investigator vectors).
+    let alias: felt252 = 0x645e7e3c50aaea87cda43b3c44431007acba5186a020738b317246f80e83d56;
+    let pre1: felt252 = 0x63d6076df4f7002fc5ee8d5a70e4266e432a96ab397dfe6d041bf9da7f91567;
+    let cls = declare("BountyManager").unwrap().contract_class();
+    let mut calldata: Array<felt252> = array![];
+    owner().serialize(ref calldata);
+    let (bm_addr, _) = cls.deploy(@calldata).unwrap();
+    let bm = IBountyManagerDispatcher { contract_address: bm_addr };
+    start_cheat_caller_address(bm_addr, owner());
+    bm.set_anonymizer(fake_anonymizer());
+    stop_cheat_caller_address(bm_addr);
+    // create_bounty_private(reward, metadata, alias) — the CREATE op shape.
+    start_cheat_caller_address(bm_addr, fake_anonymizer());
+    let bid = bm.create_bounty_private(777, 'creator-meta', alias);
+    stop_cheat_caller_address(bm_addr);
+    let b = bm.get_bounty(bid);
+    assert(b.creator_alias == alias, 'alias link');
+    assert(b.reward_amount == 777, 'reward');
+    // verify_creator_preimage + payout recipient views.
+    assert(bm.verify_creator_preimage(alias, pre1), 'tip verify');
+    assert(!bm.verify_creator_preimage(alias, 0xdead), 'bad verify');
+    assert(bm.get_payout_recipient(bid) == b.creator, 'recipient default');
+    // set_payout_address(bid, payout, preimage) shape (non-consuming).
+    let payout: ContractAddress = starknet::contract_address_const::<0xabc>();
+    start_cheat_caller_address(bm_addr, creator());
+    bm.set_payout_address(bid, payout, pre1);
+    stop_cheat_caller_address(bm_addr);
+    assert(bm.get_payout_recipient(bid) == payout, 'recipient set');
+    assert(bm.verify_creator_preimage(alias, pre1), 'tip moved');
+}

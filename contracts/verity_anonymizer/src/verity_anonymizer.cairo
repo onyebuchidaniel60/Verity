@@ -57,6 +57,10 @@ pub const ALLOWED_OP_STAKE: felt252 = 'STAKE_IDENTITY';
 pub const ALLOWED_OP_SUBMIT: felt252 = 'SUBMIT_PRIVATE';
 pub const ALLOWED_OP_REG_PAYOUT: felt252 = 'REGISTER_PAYOUT';
 pub const ALLOWED_OP_UNSTAKE: felt252 = 'UNSTAKE_IDENTITY';
+//! Private creator identity (docs/PRIVATE_INVESTIGATOR.md, creator alias).
+//! - CREATE_BOUNTY: bounty_id=0, amount=reward, note_id=metadata_hash,
+//!   secret=creator alias. Pool-routed bare invoke; assigns the next id.
+pub const ALLOWED_OP_CREATE: felt252 = 'CREATE_BOUNTY';
 
 /// Poseidon lock for a secret: must equal `computePoseidonHashOnElements([secret])`
 /// as computed by starknet.js (see parity test). Single-use; cleared on success.
@@ -74,10 +78,15 @@ pub trait IVerityAnonymizer<T> {
     fn get_bounty_manager(self: @T) -> ContractAddress;
     fn get_strk_token(self: @T) -> ContractAddress;
     fn set_bounty_manager(ref self: T, bounty_manager: ContractAddress);
-    /// Commit funding locks. DIRECT call: caller must be the BM-recorded creator.
+    /// Commit funding locks. DIRECT call.
+    /// Legacy bounties: caller must be the BM-recorded creator
+    /// (`creator_preimage` ignored, pass 0). Alias bounties: caller check is
+    /// replaced by preimage auth against the alias tip (non-consuming — lock
+    /// setup is idempotent); the direct caller is then irrelevant and no
+    /// wallet is linked to the alias.
     /// Allowed only while the bounty is Created with zero escrow (also permits
     /// creator lock rotation before funding, e.g. lost-secret recovery).
-    fn set_locks(ref self: T, bounty_id: u64, fund_lock: felt252, refund_lock: felt252);
+    fn set_locks(ref self: T, bounty_id: u64, fund_lock: felt252, refund_lock: felt252, creator_preimage: felt252);
     /// Commit a payout lock. DIRECT call: caller must be the BM-recorded winner
     /// of a Claimable bounty. Re-registration (rotation) allowed pre-release.
     fn register_payout_lock(ref self: T, bounty_id: u64, payout_lock: felt252);
@@ -119,6 +128,10 @@ pub trait IBountyManagerForAnonymizer<T> {
     fn register_private_payout_lock(ref self: T, bounty_id: u64, payout_lock: felt252, preimage: felt252);
     fn consume_preimage_by_tip(ref self: T, preimage: felt252) -> felt252;
     fn is_identity_slashed(self: @T, identity: felt252) -> bool;
+    // Private-creator callbacks.
+    fn create_bounty_private(ref self: T, reward_amount: u128, metadata_hash: felt252, creator_alias: felt252) -> u64;
+    fn verify_creator_preimage(self: @T, alias: felt252, preimage: felt252) -> bool;
+    fn get_payout_recipient(self: @T, bounty_id: u64) -> ContractAddress;
 }
 
 #[starknet::contract]
@@ -133,6 +146,7 @@ pub mod VerityAnonymizer {
     use super::{
         ALLOWED_OP_FUND, ALLOWED_OP_PROOF, ALLOWED_OP_REFUND, ALLOWED_OP_RELEASE,
         ALLOWED_OP_STAKE, ALLOWED_OP_SUBMIT, ALLOWED_OP_REG_PAYOUT, ALLOWED_OP_UNSTAKE,
+        ALLOWED_OP_CREATE,
         IBountyManagerForAnonymizerDispatcher, IBountyManagerForAnonymizerDispatcherTrait,
         check_secret,
     };
@@ -320,21 +334,29 @@ pub mod VerityAnonymizer {
             self.emit(BountyManagerUpdated { old, new: bounty_manager });
         }
 
-        fn set_locks(ref self: ContractState, bounty_id: u64, fund_lock: felt252, refund_lock: felt252) {
+        fn set_locks(ref self: ContractState, bounty_id: u64, fund_lock: felt252, refund_lock: felt252, creator_preimage: felt252) {
             let bm_addr = self.bounty_manager.read();
             assert(bm_addr.is_non_zero(), 'BM_NOT_SET');
             let bm = IBountyManagerForAnonymizerDispatcher { contract_address: bm_addr };
             // Reverts BOUNTY_NOT_FOUND for unknown bounties.
             let bounty = bm.get_bounty(bounty_id);
-            let caller = get_caller_address();
-            assert(caller == bounty.creator, 'NOT_CREATOR');
+            if bounty.creator_alias.is_non_zero() {
+                // Alias bounty: preimage auth replaces the caller check, so no
+                // wallet is linked to the alias. Non-consuming (idempotent).
+                assert(creator_preimage.is_non_zero(), 'PREIMAGE_ZERO');
+                assert(bm.verify_creator_preimage(bounty.creator_alias, creator_preimage), 'BAD_PREIMAGE');
+            } else {
+                let caller = get_caller_address();
+                assert(caller == bounty.creator, 'NOT_CREATOR');
+                assert(creator_preimage.is_zero(), 'PREIMAGE_NOT_NEEDED');
+            }
             assert(bounty.status == BountyStatus::Created, 'NOT_CREATED');
             assert(self.escrowed.read(bounty_id) == 0, 'ESCROW_NONZERO');
             assert(fund_lock.is_non_zero(), 'LOCK_ZERO');
             assert(refund_lock.is_non_zero(), 'LOCK_ZERO');
             self.fund_locks.write(bounty_id, fund_lock);
             self.refund_locks.write(bounty_id, refund_lock);
-            self.emit(LocksSet { bounty_id, setter: caller });
+            self.emit(LocksSet { bounty_id, setter: get_caller_address() });
         }
 
         fn register_payout_lock(ref self: ContractState, bounty_id: u64, payout_lock: felt252) {
@@ -455,14 +477,18 @@ pub mod VerityAnonymizer {
                 assert(amount == escrow, 'AMOUNT_MISMATCH');
                 // Authoritative state transition first; reverts for winner/paid/refunded.
                 bm.refund_bounty(bounty_id);
+                // Refunds land on the payout recipient: the explicit payout
+                // address for alias bounties, else the legacy creator
+                // (identical behavior for legacy bounties).
+                let to = bm.get_payout_recipient(bounty_id);
                 if escrow.is_non_zero() {
                     let token = IERC20Dispatcher { contract_address: self.strk_token.read() };
-                    assert(token.transfer(bounty.creator, escrow.into()), 'TRANSFER_FAILED');
+                    assert(token.transfer(to, escrow.into()), 'TRANSFER_FAILED');
                 }
                 self.escrowed.write(bounty_id, 0);
                 self.refund_locks.write(bounty_id, 0);
                 self.fund_locks.write(bounty_id, 0);
-                self.emit(EscrowRefunded { bounty_id, amount: escrow, to: bounty.creator });
+                self.emit(EscrowRefunded { bounty_id, amount: escrow, to });
                 let out: Array<OpenNoteDeposit> = array![];
                 return out.span();
             } else if operation == ALLOWED_OP_RELEASE {
@@ -576,6 +602,20 @@ pub mod VerityAnonymizer {
                 self.emit(IdentityUnstaked { identity, amount: escrow, nonce, note_id });
                 let mut out: Array<OpenNoteDeposit> = array![];
                 out.append(OpenNoteDeposit { note_id, token: token_addr, amount: escrow });
+                return out.span();
+            } else if operation == ALLOWED_OP_CREATE {
+                // Private bounty creation. Bare invoke (no value leg): assigns
+                // the next bounty id to the creator alias. The frontend reads
+                // the id back via get_bounty_count after confirmation.
+                assert(bounty_id == 0, 'BOUNTY_MUST_BE_ZERO');
+                assert(amount.is_non_zero(), 'AMOUNT_ZERO');
+                assert(note_id.is_non_zero(), 'METADATA_ZERO');
+                assert(secret.is_non_zero(), 'ALIAS_ZERO');
+                let bm_addr = self.bounty_manager.read();
+                assert(bm_addr.is_non_zero(), 'BM_NOT_SET');
+                let bm = IBountyManagerForAnonymizerDispatcher { contract_address: bm_addr };
+                let _bid = bm.create_bounty_private(amount, note_id, secret);
+                let out: Array<OpenNoteDeposit> = array![];
                 return out.span();
             } else {
                 assert(false, 'INVALID_OP');

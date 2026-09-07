@@ -32,6 +32,14 @@ pub enum SubmissionStatus {
 }
 
 /// On-chain bounty record — minimal required fields per spec §8 plus new lifecycle.
+/// `creator_alias` is the private creator identity (genesis tip of a Poseidon
+/// hash chain, same scheme as investigator identities —
+/// docs/PRIVATE_INVESTIGATOR.md). `0` = legacy wallet-created bounty where
+/// `creator` is the creator's public address AND control key. For alias
+/// bounties `creator` holds the alias cast as an address (pseudonym, no wallet
+/// data) and `payout_address` holds the creator-chosen refund recipient
+/// (a real address — money must land somewhere; creators should use a fresh
+/// address. Unset (zero) until the creator sets it pre-funding).
 #[derive(Copy, Drop, Serde, starknet::Store, PartialEq, Debug)]
 pub struct Bounty {
     pub id: u64,
@@ -43,6 +51,8 @@ pub struct Bounty {
     pub funded_amount: u128,
     pub winner: ContractAddress,
     pub winning_submission: u64,
+    pub creator_alias: felt252,
+    pub payout_address: ContractAddress,
 }
 
 /// Investigation submission — investigator pseudonymous, requires stake + reputation.

@@ -11,6 +11,7 @@ import {
   OP_SUBMIT,
   OP_REG_PAYOUT,
   OP_UNSTAKE,
+  OP_CREATE,
   chainAt,
   genesisTip,
   identityShortId,
@@ -22,7 +23,9 @@ import {
   buildSubmitActions,
   buildRegPayoutActions,
   buildUnstakeActions,
+  buildCreateActions,
   verifyOpConstants,
+  submitGate,
 } from "./identity-pure.ts";
 
 const VECTORS: Record<string, { c1: string; c2: string; c62: string; c63: string; c64: string }> = {
@@ -73,12 +76,13 @@ describe("poseidon chain vectors (match snforge constants)", () => {
 });
 
 describe("operation constants match contract short-strings", () => {
-  it("all four ops verified", () => {
+  it("all five ops verified", () => {
     assert.deepEqual(verifyOpConstants(), {
       STAKE_IDENTITY: true,
       SUBMIT_PRIVATE: true,
       REGISTER_PAYOUT: true,
       UNSTAKE_IDENTITY: true,
+      CREATE_BOUNTY: true,
     });
   });
 });
@@ -121,6 +125,15 @@ describe("STRK20 action slot shapes", () => {
     assert.equal(cd[4], "0x9a910c4");
   });
 
+  it("CREATE: [invoke(CREATE, 0, reward, nonce, metadata, alias)]", () => {
+    const [inv] = buildCreateActions({ helper, rewardWei: "10000000000000000000", metadataFelt: "0x1234", aliasHex: VECTORS["0x1"].c64, nonceHex: "0x5" });
+    const cd = (inv as any).calldata as string[];
+    assert.equal(cd[0].toLowerCase(), OP_CREATE.toLowerCase());
+    assert.equal(cd[1], "0x0");
+    assert.equal(cd[2], "0x8ac7230489e80000"); // 10 STRK
+    assert.equal(cd[4], "0x1234");
+    assert.equal(BigInt(cd[5]).toString(16), BigInt(VECTORS["0x1"].c64).toString(16));
+  });
   it("UNSTAKE: [transfer OPEN, invoke(UNSTAKE, 0, 0, nonce, openNoteIds[0], preimage)]", () => {
     const [t, inv] = buildUnstakeActions({ helper, token, selfAddress: "0xabc", preimageHex: VECTORS["0x1234"].c63, nonceHex: "0x4" });
     assert.equal((t as any).amount, "OPEN");
@@ -142,6 +155,21 @@ describe("STRK20 action slot shapes", () => {
         if (typeof item === "string" && item.startsWith("0x")) assert.match(item.toLowerCase(), feltRe, `bad felt ${item}`);
       }
     }
+  });
+});
+
+describe("submit gate (chain reads only — never localStorage/popup)", () => {
+  it("loading while reads pending — wallet must not open", () => {
+    assert.equal(submitGate({ loaded: false, privateEligible: false, legacyEligible: false }), "loading");
+    assert.equal(submitGate({ loaded: false, privateEligible: true, legacyEligible: true }), "loading");
+  });
+  it("eligible via either chain-read path", () => {
+    assert.equal(submitGate({ loaded: true, privateEligible: true, legacyEligible: false }), "eligible");
+    assert.equal(submitGate({ loaded: true, privateEligible: false, legacyEligible: true }), "eligible");
+    assert.equal(submitGate({ loaded: true, privateEligible: true, legacyEligible: true }), "eligible");
+  });
+  it("blocked when reads done and neither path passes (NOT_STAKED otherwise)", () => {
+    assert.equal(submitGate({ loaded: true, privateEligible: false, legacyEligible: false }), "blocked");
   });
 });
 

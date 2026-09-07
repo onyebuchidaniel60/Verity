@@ -319,8 +319,7 @@ fn test_select_winner_only_creator() {
 
 #[test]
 #[should_panic(expected: 'REPUTATION_TOO_LOW')]
-fn test_reputation_threshold_enforced() {
-    let (bm_addr, bm) = deploy_bounty_manager();
+fn test_reputation_threshold_enforced() {    let (bm_addr, bm) = deploy_bounty_manager();
     let pool_addr = pool();
     let anon_addr = anon_addr_for_test(pool_addr);
     start_cheat_caller_address(bm_addr, owner());
@@ -341,4 +340,29 @@ fn test_reputation_threshold_enforced() {
     bm.stake();
     let _ = bm.submit_investigation(bid, 'e');
     stop_cheat_caller_address(bm_addr);
+}
+
+#[test]
+fn test_refund_via_helper_caller_succeeds() {
+    // The pool-routed helper REFUND op calls refund_bounty with
+    // caller == anonymizer. This previously reverted NOT_CREATOR, which
+    // would have made every real (wallet-signed) refund fail on-chain.
+    let (bm_addr, bm) = deploy_bounty_manager();
+    let pool_addr = pool();
+    let anon_addr = anon_addr_for_test(pool_addr);
+    start_cheat_caller_address(bm_addr, owner());
+    bm.set_anonymizer(anon_addr);
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, creator());
+    let bid = bm.create_bounty(1000, 'm');
+    stop_cheat_caller_address(bm_addr);
+    start_cheat_caller_address(bm_addr, anon_addr);
+    bm.fund_bounty(bid, 1000);
+    stop_cheat_caller_address(bm_addr);
+    // Helper-settled refund (as the VerityAnonymizer REFUND op performs).
+    start_cheat_caller_address(bm_addr, anon_addr);
+    bm.refund_bounty(bid);
+    stop_cheat_caller_address(bm_addr);
+    let b = bm.get_bounty(bid);
+    assert(b.status == BountyStatus::Refunded, 'not Refunded');
 }

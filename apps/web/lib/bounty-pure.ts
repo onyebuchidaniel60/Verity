@@ -23,6 +23,10 @@ export interface BountyViewModel {
   winningSubmission: number | null;
   title: string;
   description: string;
+  // Private creator identity: commitment felt (decimal/hex string) or null
+  // when unset/legacy. Payout recipient address or null when unset.
+  creatorAlias: string | null;
+  payoutAddress: string | null;
 }
 
 export function formatRewardWei(wei: bigint | string | number): string {
