@@ -30,6 +30,8 @@ import {
   getSubmissionStatusName,
   generateSecret,
   computeLock,
+  hexFelt,
+  buildCreateBountyCalldata,
 } from "./bounty-pure.ts";
 
 describe("Bug 1 — exact reward conversion (BigInt, never Number/1e18)", () => {
@@ -282,5 +284,48 @@ describe("Bug 2 — badge strictly follows chain status (CREATED never Funded)",
     assert.equal(getSubmissionStatusName({ variant: { Slashed: {} } }), "Slashed");
     assert.equal(getSubmissionStatusName("1"), "Accepted");
     assert.equal(getSubmissionStatusName("Pending"), "Pending");
+  });
+});
+
+describe("Create bounty wallet payload (INVALID_REQUEST_PAYLOAD regression)", () => {
+  // Ready X validates wallet_addInvokeTransaction calldata as ^0x hex felts
+  // and rejects starknet.js decimal strings with code 114. The create flow
+  // therefore sends pre-built hex calldata via account.execute.
+  const FELT_RE = /^0x[0-9a-fA-F]+$/;
+  const PRIME = 2n ** 251n + 17n * 2n ** 192n + 1n;
+  const cases: Array<[string, string]> = [
+    ["0.1", "100000000000000000"],
+    ["1", "1000000000000000000"],
+    ["10", "10000000000000000000"],
+    ["1550", "1550000000000000000000"],
+    ["10000", "10000000000000000000000"],
+  ];
+  for (const [human, wei] of cases) {
+    it(`${human} STRK -> hex calldata round-trips exactly`, () => {
+      const metadataFelt = "0x" + Buffer.from("Verify the source").toString("hex");
+      const [rewardHex, metadataHex] = buildCreateBountyCalldata(humanToWei(human), metadataFelt);
+      for (const el of [rewardHex, metadataHex]) {
+        assert.match(el, FELT_RE);
+        assert.ok(BigInt(el) < PRIME);
+      }
+      assert.equal(BigInt(rewardHex).toString(), wei);
+      assert.equal(BigInt(metadataHex).toString(), BigInt(metadataFelt).toString());
+    });
+  }
+  it("10 STRK -> 0x8ac7230489e80000 (exact u128, never Number)", () => {
+    const [rewardHex] = buildCreateBountyCalldata(humanToWei("10"), "0x1234");
+    assert.equal(rewardHex, "0x8ac7230489e80000");
+  });
+  it("hexFelt accepts decimal, hex, number and bigint", () => {
+    assert.equal(hexFelt("1000000000000000000"), "0xde0b6b3a7640000");
+    assert.equal(hexFelt("0xde0b6b3a7640000"), "0xde0b6b3a7640000");
+    assert.equal(hexFelt(5), "0x5");
+    assert.equal(hexFelt(5n), "0x5");
+    assert.equal(hexFelt("0x0"), "0x0");
+  });
+  it("out-of-range and garbage values throw before reaching the wallet", () => {
+    assert.throws(() => hexFelt(2n ** 251n + 17n * 2n ** 192n + 1n), /felt range/);
+    assert.throws(() => hexFelt("-1"), /felt range/);
+    assert.throws(() => buildCreateBountyCalldata("not-a-number", "0x1234"));
   });
 });

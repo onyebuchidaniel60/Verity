@@ -2026,3 +2026,78 @@ D. Success only when Voyager shows ACCEPTED_ON_L2 AND chain views confirm
   files, no secrets/keys (public addresses + tx hashes only).
 - Pushed `5be637f..05ba399 main -> main`; local `main` == `origin/main` ==
   `05ba399` (verified via live `git ls-remote`).
+
+## 42. CREATE-BOUNTY INVALID_REQUEST_PAYLOAD — DIAGNOSED + FIXED (2026-09-07, Muse Spark)
+
+### 42.1 Exact root cause (Layer A — application payload, NOT contracts)
+
+Ready X validates `wallet_addInvokeTransaction` calldata as `^0x` hex felts
+and rejects anything else with code 114 (`INVALID_REQUEST_PAYLOAD`) — the
+same gate already proven by commit 3c594dd for the STRK20 fund/claim path
+(decimal bounty_id/amount rejected at actions[1].calldata[1..2]).
+
+The public create path built its call via starknet.js
+`Contract.invoke("create_bounty", [rewardWei, metadataFelt])`. starknet
+10.5.0 `CallData.compile` (CairoUint128/CairoFelt252 `toApiRequest`)
+NORMALIZES every element to a DECIMAL string, and `WalletAccount.execute`
+passes calldata through unchanged. Reproduced locally with the installed
+starknet (debug script, since deleted): 10 STRK produced
+`calldata: ["10000000000000000000","29399129642388625212778380946918341763941"]`
+— BOTH elements schema-invalid. Passing 0x-hex into `Contract.invoke` does
+NOT help (it re-decimalizes). Eliminated with evidence: contract address
+(66-char hex < PRIME, byte-matches deploy output), entrypoint (matches V3
+ABI `create_bounty(u128,felt)`), network/chain (unchanged), amount
+conversion (BigInt-exact, in u128 range), metadata (<=31 bytes, valid felt),
+STRK20 routing (create correctly uses normal `wallet_addInvokeTransaction`,
+never `wallet_strk20InvokeTransaction`; `token:""` in createStrk20Account is
+dead config — the function ignores it). No contract/staking/funding/identity/
+reputation/lifecycle change: the bug is purely transport encoding.
+
+### 42.2 Contract-side proof (V3 accepts the call)
+
+`sncast invoke create_bounty(0xde0b6b3a7640000, 0x54657374)` on V3
+`0x04315e84...` → `0x01d483c2ebc293002a599903a1228035ad9cc83c929382e0dc3059ad599a69a0`,
+ACCEPTED_ON_L2 + Succeeded, fee ~0.116 STRK, block 14705913. Read-back:
+bounty #1 = reward exactly 1000000000000000000, status Created, funded 0,
+metadata 0x54657374. CREATED ≠ FUNDED preserved. (Sidebar: sncast also
+rejects decimal calldata — `invalid dec string` — same hex discipline.)
+
+### 42.3 Fix (frontend only, 3 files)
+
+- `apps/web/lib/bounty-pure.ts`: new `hexFelt` (BigInt-exact → `0x` + range
+  check) and `buildCreateBountyCalldata(rewardWei, metadataFelt)` (returns
+  schema-validated `[rewardHex, metadataHex]`).
+- `apps/web/app/create/page.tsx`: public `handleCreate` sends pre-built hex
+  calldata via `account.execute({contractAddress, entrypoint, calldata})`
+  with a `[create bounty] wallet_addInvokeTransaction` console log of the
+  exact payload (contract, entrypoint, every element); same swap for its
+  `set_locks` call and for private-create's `set_payout_address`/`set_locks`
+  (identical decimal pattern, would have failed next). Removed the two now-
+  unused local ABI consts. No Create+Fund merge: creation stays a normal
+  public invoke; `Fund privately` remains separate.
+- `apps/web/lib/bounty.regression.test.ts`: +8 tests (0.1/1/10/1550/10000
+  STRK hex round-trip + FELT schema + PRIME range; `10 STRK =
+  0x8ac7230489e80000`; hexFelt input shapes; out-of-range/garbage throws
+  before reaching the wallet).
+
+### 42.4 Verification
+
+- bounty 42/42 (34 existing + 8 new), identity 20/20, `tsc --noEmit` 0,
+  `next build` 7/7, `snforge test` 126/126 (contracts untouched).
+- KNOWN FOLLOW-UP (out of scope, not silently fixed): every other
+  `Contract.invoke` direct-call flow (open/stake-legacy/submit/select/
+  report/challenge/resolve/withdraw/locks-retry/register_payout_lock,
+  bounty-detail creator ops) shares the starknet-decimal pattern and will
+  hit the same wallet gate — each needs the same one-line transport swap
+  when its turn comes. Private STRK20 flows (fund/stake/submit/unstake/
+  private-create) already send manual hex and are unaffected.
+- Real-wallet click-through (0.1/1/10 STRK in Ready X) still needs the USER:
+  the agent cannot sign. Payload is now schema-valid by construction +
+  contract-proven; user must confirm the popup opens, signs, and lands
+  CREATED with the exact reward.
+
+### 42.5 Funds (no further deployment needed)
+
+- V3 deployment already complete (§41). Deployer now ~25.98 STRK (live
+  re-read; -0.116 for the contract-side create proof). Nothing else to
+  deploy; do NOT spend further without a reason.

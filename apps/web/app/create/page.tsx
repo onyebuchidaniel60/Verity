@@ -6,7 +6,7 @@ import { Contract } from "starknet";
 import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof";
 import { CONTRACTS } from "@/lib/contracts";
 import { createProvider } from "@/lib/starknet";
-import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets } from "@/lib/bounty";
+import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets, buildCreateBountyCalldata, hexFelt } from "@/lib/bounty";
 import {
   genesisTip, peekCreatorPreimage, buildCreateActions, saveCreator,
   generateIdentitySeed,
@@ -14,16 +14,6 @@ import {
 import { STRK20 } from "@/lib/strk20";
 
 const NETWORK = "sepolia" as const;
-
-// Helper set_locks ABI (direct call on VerityAnonymizer; creator_preimage is
-// 0 for legacy bounties, the alias preimage for private bounties).
-const SET_LOCKS_ABI = [
-  { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }, { name: "creator_preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
-] as const;
-
-const SET_PAYOUT_ABI = [
-  { name: "set_payout_address", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout", type: "core::starknet::contract_address::ContractAddress" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
-] as const;
 
 export default function CreateBountyPage() {
   const [title, setTitle] = useState("");
@@ -59,13 +49,15 @@ export default function CreateBountyPage() {
       const { wallet } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
 
-      const abi = [
-        { name: "create_bounty", type: "function", inputs: [{ name: "reward_amount", type: "core::integer::u128" }, { name: "metadata_hash", type: "core::felt252" }], outputs: [{ name: "bounty_id", type: "core::integer::u64" }], stateMutability: "external" },
-        { name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" },
-      ] as const;
-
-      const contract = new Contract({ abi: abi as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await contract.invoke("create_bounty", [rewardWei, metadataFelt]);
+      // Normal public invoke (wallet_addInvokeTransaction — NOT the STRK20
+      // privacy API; creation and private funding are separate steps).
+      // starknet.js CallData.compile emits DECIMAL strings, which Ready X
+      // rejects with INVALID_REQUEST_PAYLOAD, so the hex calldata is
+      // pre-built + schema-validated and sent via account.execute directly.
+      const [rewardHex, metadataHex] = buildCreateBountyCalldata(rewardWei, metadataFelt);
+      const createCall = { contractAddress: CONTRACTS.bountyManager!, entrypoint: "create_bounty", calldata: [rewardHex, metadataHex] };
+      console.info("[create bounty] wallet_addInvokeTransaction", createCall);
+      const res: any = await account.execute(createCall);
       const hash = res.transaction_hash ?? res.hash ?? "";
       // CREATE does NOT fund: wait for actual L2 confirmation, then read the
       // authoritative on-chain bounty ID + reward. Metadata is written only
@@ -122,8 +114,10 @@ export default function CreateBountyPage() {
             refundSecret = generateSecret();
             const fundLock = computeLock(fundSecret);
             const refundLock = computeLock(refundSecret);
-            const cLocks = new Contract({ abi: SET_LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
-            const lres: any = await cLocks.invoke("set_locks", [newId, fundLock, refundLock, "0x0"]);
+            // Hex calldata (same INVALID_REQUEST_PAYLOAD reason as create).
+            const locksCalldata = [hexFelt(newId), hexFelt(fundLock), hexFelt(refundLock), "0x0"];
+            console.info("[create bounty] wallet_addInvokeTransaction set_locks", { contract_address: CONTRACTS.verityAnonymizer, calldata: locksCalldata });
+            const lres: any = await account.execute({ contractAddress: CONTRACTS.verityAnonymizer!, entrypoint: "set_locks", calldata: locksCalldata });
             locksHash = lres.transaction_hash ?? lres.hash ?? "";
             if (locksHash) {
               try {
@@ -239,16 +233,20 @@ export default function CreateBountyPage() {
       let refundSecret: string | null = null;
       try {
         setBusyStep("locks");
-        const cBM = new Contract({ abi: SET_PAYOUT_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+        // Direct invokes use pre-built hex calldata (same INVALID_REQUEST_PAYLOAD
+        // reason as public create: starknet.js would emit decimal strings).
         const stored = { seed, alias, nextK: 63 };
-        const pres: any = await cBM.invoke("set_payout_address", [newId, payout, peekCreatorPreimage(stored)]);
+        const payoutCalldata = [hexFelt(newId), hexFelt(payout.trim()), hexFelt(peekCreatorPreimage(stored))];
+        console.info("[create private] wallet_addInvokeTransaction set_payout_address", { contract_address: CONTRACTS.bountyManager, calldata: payoutCalldata });
+        const pres: any = await account.execute({ contractAddress: CONTRACTS.bountyManager!, entrypoint: "set_payout_address", calldata: payoutCalldata });
         try {
           await provider.waitForTransaction(pres.transaction_hash ?? pres.hash, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
         } catch {}
         fundSecret = generateSecret();
         refundSecret = generateSecret();
-        const cLocks = new Contract({ abi: SET_LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
-        const lres: any = await cLocks.invoke("set_locks", [newId, computeLock(fundSecret), computeLock(refundSecret), peekCreatorPreimage(stored)]);
+        const privLocksCalldata = [hexFelt(newId), hexFelt(computeLock(fundSecret)), hexFelt(computeLock(refundSecret)), hexFelt(peekCreatorPreimage(stored))];
+        console.info("[create private] wallet_addInvokeTransaction set_locks", { contract_address: CONTRACTS.verityAnonymizer, calldata: privLocksCalldata });
+        const lres: any = await account.execute({ contractAddress: CONTRACTS.verityAnonymizer!, entrypoint: "set_locks", calldata: privLocksCalldata });
         locksHash = lres.transaction_hash ?? lres.hash ?? "";
         if (locksHash) {
           try {

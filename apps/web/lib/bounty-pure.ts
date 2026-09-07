@@ -69,6 +69,32 @@ export function humanToWei(s: string): string {
   return BigInt((whole === "" ? "0" : whole) + frac18).toString();
 }
 
+const HEX_FELT_RE = /^0x[0-9a-fA-F]+$/;
+
+/** Canonical 0x-hex felt for wallet calldata.
+ *  Accepts decimal or 0x-hex input (BigInt-exact, never Number) and validates
+ *  the felt range. Ready X validates invoke calldata as ^0x hex felts and
+ *  rejects decimal strings with INVALID_REQUEST_PAYLOAD. */
+export function hexFelt(v: bigint | string | number): string {
+  const n = typeof v === "bigint" ? v : BigInt(String(v).trim());
+  if (n < 0n || n >= STARK_PRIME) throw new Error("Value out of felt range");
+  return "0x" + n.toString(16);
+}
+
+/** Hex calldata for BountyManager.create_bounty(reward u128, metadata felt).
+ *  starknet.js CallData.compile emits DECIMAL strings, which Ready X rejects
+ *  with INVALID_REQUEST_PAYLOAD — so the create flow bypasses Contract.invoke
+ *  and sends this pre-built, schema-validated hex array via account.execute
+ *  (normal wallet_addInvokeTransaction path, NOT the STRK20 privacy API).
+ *  Values are BigInt-exact: 10 STRK -> 0x8ac7230489e80000, never Number/1e18. */
+export function buildCreateBountyCalldata(rewardWei: string, metadataFelt: string): [string, string] {
+  const out = [hexFelt(rewardWei), hexFelt(metadataFelt)] as [string, string];
+  for (const el of out) {
+    if (!HEX_FELT_RE.test(el)) throw new Error(`Invalid wallet calldata felt: ${el}`);
+  }
+  return out;
+}
+
 // Extract status name from CairoCustomEnum or string/number
 // Canonical return is PascalCase: Created|Funded|Open|WinnerSelected|Claimable|Paid|Refunded
 export function getStatusName(status: any): BountyStatusName {
