@@ -9,6 +9,7 @@ edition.workspace = true
 starknet.workspace = true
 openzeppelin.workspace = true
 privacy.workspace = true
+bounty_manager = { path = "../bounty_manager" }
 
 [dev-dependencies]
 snforge_std.workspace = true

@@ -2,6 +2,9 @@
 //! Covers VERITY_PROOF (Gate2) with replay, pool auth, etc.
 //! FundBounty (Phase3) tests are in bounty_manager integration tests to avoid
 //! cross-package artifact issues at this milestone.
+//!
+//! NOTE: privacy_invoke now takes 6 args (..., note_id, secret) after the
+//! Phase 3 secret-bound funding upgrade (new deployment). PROOF ignores secret.
 
 #[feature("deprecated-starknet-consts")]
 use core::num::traits::Zero;
@@ -20,8 +23,9 @@ fn deploy_anonymizer(pool: ContractAddress) -> (ContractAddress, IVerityAnonymiz
     let contract_class = declare("VerityAnonymizer").unwrap().contract_class();
     let mut calldata: Array<felt252> = array![];
     pool.serialize(ref calldata);
-    // bounty_manager = 0, owner = 0 (will be deployer)
+    // bounty_manager = 0, owner = 0 (will be deployer), strk_token = 0 (protocol STRK)
     let zero: ContractAddress = starknet::contract_address_const::<0x0>();
+    zero.serialize(ref calldata);
     zero.serialize(ref calldata);
     zero.serialize(ref calldata);
     let (address, _) = contract_class.deploy(@calldata).unwrap();
@@ -41,7 +45,7 @@ fn test_pool_caller_accepted() {
     let pool = pool_address();
     let (addr, dispatcher) = deploy_anonymizer(pool);
     start_cheat_caller_address(addr, pool);
-    let span = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'nonce1', 0);
+    let span = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'nonce1', 0, 0);
     stop_cheat_caller_address(addr);
     assert(span.len() == 0, 'expected empty span');
 }
@@ -52,7 +56,7 @@ fn test_pool_caller_returns_deposit_when_note_id_nonzero() {
     let (addr, dispatcher) = deploy_anonymizer(pool);
     start_cheat_caller_address(addr, pool);
     let note_id = 0xabc;
-    let span = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'nonce2', note_id);
+    let span = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'nonce2', note_id, 0);
     stop_cheat_caller_address(addr);
     assert(span.len() == 1, 'expected one deposit');
     let deposit: OpenNoteDeposit = *span.at(0);
@@ -68,7 +72,7 @@ fn test_non_pool_caller_rejected() {
     let (addr, dispatcher) = deploy_anonymizer(pool);
     let attacker = other_address();
     start_cheat_caller_address(addr, attacker);
-    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'nonce3', 0);
+    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'nonce3', 0, 0);
     stop_cheat_caller_address(addr);
 }
 
@@ -78,8 +82,8 @@ fn test_replay_protection_rejects_second_use_of_nonce() {
     let pool = pool_address();
     let (addr, dispatcher) = deploy_anonymizer(pool);
     start_cheat_caller_address(addr, pool);
-    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'replay_nonce', 0);
-    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'replay_nonce', 0);
+    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'replay_nonce', 0, 0);
+    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 'replay_nonce', 0, 0);
     stop_cheat_caller_address(addr);
 }
 
@@ -89,7 +93,7 @@ fn test_invalid_operation_rejected() {
     let pool = pool_address();
     let (addr, dispatcher) = deploy_anonymizer(pool);
     start_cheat_caller_address(addr, pool);
-    let _ = dispatcher.privacy_invoke('WRONG_OP', 0, 0, 'nonce4', 0);
+    let _ = dispatcher.privacy_invoke('WRONG_OP', 0, 0, 'nonce4', 0, 0);
     stop_cheat_caller_address(addr);
 }
 
@@ -99,7 +103,7 @@ fn test_zero_nonce_rejected() {
     let pool = pool_address();
     let (addr, dispatcher) = deploy_anonymizer(pool);
     start_cheat_caller_address(addr, pool);
-    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 0, 0);
+    let _ = dispatcher.privacy_invoke(ALLOWED_OP_PROOF, 0, 0, 0, 0, 0);
     stop_cheat_caller_address(addr);
 }
 
@@ -108,7 +112,7 @@ fn test_get_pool_and_version() {
     let pool = pool_address();
     let (_addr, dispatcher) = deploy_anonymizer(pool);
     let version = dispatcher.version();
-    assert(version == 'VERITY_ANONYMIZER_V1', 'version mismatch');
+    assert(version == 'VERITY_ANONYMIZER_V2', 'version mismatch');
     let got_pool = dispatcher.get_pool();
     assert(got_pool == pool, 'pool mismatch');
 }

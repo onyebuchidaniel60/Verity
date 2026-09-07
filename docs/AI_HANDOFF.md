@@ -1385,6 +1385,29 @@ owner decisions D1/D2). This §32 is the pointer + verdict summary.
 **Awaiting owner:** D1 (secret-bound vs permissionless funding), D2 (green
 light to implement). No staking/identity work started.
 
+## 33. PHASE 3 IMPLEMENTATION — START checkpoint (2026-09-07, Muse Spark)
+
+**Authorization:** D1 secret-bound + D2 implement, autonomous, no more
+approvals needed. Starting from `8c1e643`. Scope: helper rewrite (locks,
+escrow, FUND/REFUND/RELEASE, 6-arg `privacy_invoke`), comprehensive snforge
+tests (incl. JS↔Cairo Poseidon parity proof), frontend (secrets at creation,
+`set_locks`, withdraw+invoke funding, secret refund, two-stage claim),
+Sepolia deploy + wiring. BM untouched. No staking/identity work.
+
+**Pre-implementation dependency checks (done):**
+- Poseidon: starknet.js exposes `hash.computePoseidonHashOnElements`; Cairo
+  `core::poseidon::poseidon_hash_span`. Parity will be PROVEN by a snforge
+  test asserting Cairo output against node-computed constants
+  (`0x1234→0x4e87ec…`, `0xabcdef123456789→0x1276cd…`, `0x7fff…→0x241630…`).
+- Mock-token strategy: own minimal `MockStrk` in the new test file
+  (no new external test deps). Helper `strk_token` becomes a constructor arg
+  (0 ⇒ real STRK constant) so unit tests can point at the mock.
+- sncast accounts present: `ready-sepolia` (owner/deployer/creator) and
+  `investigator-sepolia`. Deploy + wiring via sncast feasible; the private
+  FUND tx itself strictly needs the browser wallet (user step).
+- Existing `anonymizer_test.cairo` uses the 5-arg `privacy_invoke` — will be
+  mechanically updated to 6 args (new deployment anyway).
+
 
 
 
