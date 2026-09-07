@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { Contract, constants } from "starknet";
-import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof";
+import { connectWallet, createStrk20Account, strk20InvokeBareActions } from "@/strk20-proof/strk20-proof";
 import { CONTRACTS } from "@/lib/contracts";
 import { createProvider } from "@/lib/starknet";
 import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets, buildCreateBountyCalldata, hexFelt, normalizeContractAddress, buildInvokeCall, toWalletInvokeParams } from "@/lib/bounty";
@@ -215,9 +215,11 @@ export default function CreateBountyPage() {
       });
       let hash = "";
       try {
-        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        // Bare invoke (no value leg): shared fallback chain
+        // (direct -> prepare+addInvoke); the helper logs the exact request.
+        const res = await strk20InvokeBareActions({ account, actions: actionArray, logTag: "create private", context: { pool: STRK20[NETWORK].poolAddress, token: STRK20[NETWORK].strkTokenAddress } });
         hash = res.transaction_hash ?? res.hash ?? "";
-        console.info("[create private] wallet response", res);
+        console.info("[create private] accepted via", res.path);
       } catch (e: any) {
         console.error("[create private] wallet_strk20InvokeTransaction error", e);
         throw e;

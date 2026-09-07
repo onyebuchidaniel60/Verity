@@ -40,7 +40,7 @@ Poseidon hash chain whose seed never leaves the investigator's device.
 | Component | Use |
 | --- | --- |
 | `wallet_strk20InvokeTransaction` (`withdraw` + `invoke`) | Private stake: shielded STRK moves to the helper, then `STAKE_IDENTITY` escrows it under the commitment |
-| `wallet_strk20InvokeTransaction` (`invoke` only) | Private submit (`SUBMIT_PRIVATE`) and payout-lock registration (`REGISTER_PAYOUT`) ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â bare-invoke pattern proven by Gate 2 |
+| `wallet_strk20InvokeTransaction` (`invoke` only) | Private submit (`SUBMIT_PRIVATE`) and payout-lock registration (`REGISTER_PAYOUT`) — bare-invoke shape; CORRECTION (2026-09-08): never wallet-accepted (Ready backend rejects invoke-only lists with INVALID_REQUEST_PAYLOAD; no bare-invoke tx exists in `strk20.json`, Gate 2 never executed one). Submitted via the `strk20InvokeBareActions` fallback chain (direct → prepare+addInvoke), see handoff §45 |
 | `wallet_strk20InvokeTransaction` (`transfer OPEN` + `invoke`) | Private unstake (`UNSTAKE_IDENTITY`) ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â same shape as the payout claim |
 | `privacy_invoke` (pool ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ helper) | All four identity ops; pool-only auth + nonce replay protection, unchanged from funding |
 | `privacy::objects::OpenNoteDeposit` (real type) | `UNSTAKE_IDENTITY` returns an exact-backed deposit (same pattern as `RELEASE`) |

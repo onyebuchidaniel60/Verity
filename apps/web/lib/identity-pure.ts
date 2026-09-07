@@ -252,6 +252,136 @@ export function buildUnstakeActions(opts: {
   ];
 }
 
+// ---- STRK20 request diagnostics + bare-invoke submission path -------------
+// Production finding (Sepolia + Ready X): `wallet_strk20InvokeTransaction`
+// with an INVOKE-ONLY action list is rejected by the wallet backend
+// (`privacy.strk20Invoke`, INVALID_REQUEST_PAYLOAD), while the identical
+// invoke leg paired with a value leg (withdraw/transfer) is accepted
+// (fund, stake). starknet.js forwards `actions` verbatim, and every
+// bare-invoke value is a valid felt, so the discriminator is the absence of
+// any deposit/withdraw/transfer leg — not a malformed field. The helpers
+// below (a) log the EXACT request sanitized for secrets, (b) classify the
+// 114 error across wallet error shapes, (c) map a prepared call back to
+// starknet.js shape for the spec-sanctioned prepare -> addInvokeTransaction
+// two-step path (`executeWithProof`), which needs NO contract change.
+
+/** Index of the secret slot in our 6-slot privacy_invoke convention
+ *  (op, bounty_id, amount, nonce, note_id, secret). Always redacted in logs:
+ *  single-use preimages, fund/refund secrets, or identity/alias commitments. */
+export const SECRET_CALLDATA_SLOT = 5;
+
+/** True when `e` is a wallet/backend INVALID_REQUEST_PAYLOAD (code 114 in
+ *  any `code` field, or the literal in any message/name string). Numeric 114
+ *  only counts as a `code` field so hashes/counters containing 114 elsewhere
+ *  can never misclassify. */
+export function isInvalidRequestPayloadError(e: unknown): boolean {
+  const queue: unknown[] = [e];
+  const seen = new Set<unknown>();
+  for (let i = 0; i < queue.length && i < 50; i++) {
+    const cur = queue[i];
+    if (cur === null || cur === undefined) continue;
+    if (typeof cur === "string") {
+      if (cur.includes("INVALID_REQUEST_PAYLOAD")) return true;
+      continue;
+    }
+    if (typeof cur !== "object") continue;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    const o = cur as Record<string, unknown>;
+    if (o.code === 114 || o.code === "114") return true;
+    queue.push(o.message, o.name, o.data, o.cause);
+  }
+  return false;
+}
+
+export interface Strk20LogItem {
+  index: number;
+  value: string;
+  jsType: string;
+  chars: number;
+}
+
+export interface Strk20LoggedAction {
+  actionIndex: number;
+  type: unknown;
+  token?: unknown;
+  amount?: unknown;
+  recipient?: unknown;
+  contract?: unknown;
+  calldata?: Strk20LogItem[];
+  extraKeys?: string[];
+}
+
+/** Sanitized 1:1 summary of the EXACT actions array about to hit the wallet:
+ *  every action type/contract/calldata with per-item index, value, JS type
+ *  and length. Literal "OPEN" and `${openNoteIds[N]}`/`${poolAddress}`
+ *  placeholders pass through VERBATIM (never hex-normalized). Invoke
+ *  calldata at SECRET_CALLDATA_SLOT is redacted (length shown for shape
+ *  correlation). Seeds/keys never enter builders, so never appear here. */
+export function sanitizeStrk20ActionsForLog(actions: unknown[]): Strk20LoggedAction[] {
+  return (actions ?? []).map((a, actionIndex) => {
+    if (typeof a !== "object" || a === null) return { actionIndex, type: typeof a };
+    const o = a as Record<string, unknown>;
+    const out: Strk20LoggedAction = { actionIndex, type: o.type };
+    for (const k of ["token", "amount", "recipient", "contract"] as const) {
+      if (o[k] !== undefined) (out as unknown as Record<string, unknown>)[k] = o[k];
+    }
+    if (Array.isArray(o.calldata)) {
+      out.calldata = (o.calldata as unknown[]).map((item, index) => {
+        if (index === SECRET_CALLDATA_SLOT && typeof item === "string") {
+          return { index, value: "<secret-redacted>", jsType: "string", chars: item.length };
+        }
+        const s = typeof item === "string" ? item : String(item);
+        return { index, value: s, jsType: typeof item, chars: s.length };
+      });
+    }
+    const known = new Set(["type", "token", "amount", "recipient", "contract", "calldata"]);
+    out.extraKeys = Object.keys(o).filter((k) => !known.has(k));
+    return out;
+  });
+}
+
+/** Console.info the exact sanitized wallet request; returns the summary for
+ *  tests. `extra` carries non-secret context (pool, token, versions...). */
+export function logStrk20Request(
+  tag: string,
+  method: string,
+  actions: unknown[],
+  extra?: Record<string, unknown>,
+): Strk20LoggedAction[] {
+  const summary = sanitizeStrk20ActionsForLog(actions);
+  let safe: unknown = null;
+  try {
+    safe = JSON.parse(JSON.stringify({ method, actionCount: summary.length, actions: summary, ...(extra ?? {}) }));
+  } catch {
+    safe = { method, actionCount: summary.length, note: "(unsanitizable summary)" };
+  }
+  console.info(`[${tag}] ${method} request`, safe);
+  return summary;
+}
+
+export interface StarknetJsCall {
+  contractAddress: string;
+  entrypoint: string;
+  calldata: string[];
+}
+
+/** Map a wallet-shaped prepared call
+ *  `{contract_address, entry_point, calldata}` (from
+ *  `wallet_strk20PrepareInvoke`) to starknet.js shape for `executeWithProof`.
+ *  Throws on malformed input BEFORE anything reaches the wallet. */
+export function toStarknetCallsFromPrepared(preparedCall: unknown): StarknetJsCall[] {
+  const c = preparedCall as Record<string, unknown> | null | undefined;
+  if (!c || typeof c.contract_address !== "string" || typeof c.entry_point !== "string" || !Array.isArray(c.calldata)) {
+    throw new Error("strk20 prepare returned a malformed call (expected {contract_address, entry_point, calldata})");
+  }
+  return [{
+    contractAddress: c.contract_address,
+    entrypoint: c.entry_point,
+    calldata: (c.calldata as unknown[]).map((x) => String(x)),
+  }];
+}
+
 /** Submit-gate decision from CHAIN-READ eligibility only.
  *  - 'loading': reads pending → wallet must not open.
  *  - 'eligible': private identity OR legacy stake path passes.

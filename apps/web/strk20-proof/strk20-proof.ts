@@ -39,6 +39,11 @@ import { createStore, type Store } from "@starknet-io/get-starknet-discovery";
 import type { WalletWithStarknetFeatures } from "@starknet-io/get-starknet-wallet-standard/features";
 import { STRK20 } from "../lib/strk20";
 import { createProvider, type VerityNetwork } from "../lib/starknet";
+import {
+  isInvalidRequestPayloadError,
+  logStrk20Request,
+  toStarknetCallsFromPrepared,
+} from "../lib/identity-pure";
 
 /**
  * Singleton Wallet Standard discovery store.
@@ -309,6 +314,72 @@ export async function createStrk20Account(
   // so that standard:events → subscribeWalletEvent bridging works.
   const account = await WalletAccountV6.connect(provider, wallet);
   return account;
+}
+
+export type Strk20SubmitPath = "direct" | "prepare-then-invoke";
+
+export interface Strk20SubmitResult {
+  transaction_hash?: string;
+  hash?: string;
+  path: Strk20SubmitPath;
+  raw: unknown;
+}
+
+/**
+ * Submit an INVOKE-ONLY (bare, no value leg) STRK20 action list.
+ *
+ * Production finding: Ready's `privacy.strk20Invoke` backend rejects
+ * invoke-only lists with INVALID_REQUEST_PAYLOAD while the identical invoke
+ * leg paired with a withdraw/transfer is accepted — so this helper tries,
+ * in order, logging the EXACT sanitized request before each wallet call:
+ *   1. direct `wallet_strk20InvokeTransaction(actions)` (unchanged shape;
+ *      keeps working if backend behavior changes; fails fast, pre-prompt);
+ *   2. ONLY on INVALID_REQUEST_PAYLOAD, the spec-sanctioned two-step path:
+ *      `wallet_strk20PrepareInvoke(actions, false)` ->
+ *      `wallet_addInvokeTransaction({calls, proof})` via `executeWithProof`.
+ * Every other error (USER_REFUSED, NOT_REGISTERED, INSUFFICIENT_*, ...) is
+ * rethrown immediately — never a second wallet prompt. Value-leg flows
+ * (fund/stake/unstake/claim) MUST NOT use this helper; they call
+ * `strk20InvokeTransaction` directly (frozen).
+ */
+export async function strk20InvokeBareActions(opts: {
+  account: WalletAccountV6;
+  actions: unknown[];
+  logTag: string;
+  context?: Record<string, unknown>;
+}): Promise<Strk20SubmitResult> {
+  const { account, actions, logTag } = opts;
+  if (!Array.isArray(actions) || actions.length < 1) {
+    throw new Error(`${logTag}: refusing empty STRK20 action list`);
+  }
+  actions.forEach((a, i) => {
+    const t = (a as Record<string, unknown> | null)?.type;
+    if (typeof t !== "string" || !t) throw new Error(`${logTag}: action[${i}] missing string type`);
+  });
+  logStrk20Request(logTag, "wallet_strk20InvokeTransaction", actions, opts.context);
+  try {
+    const res = (await account.strk20InvokeTransaction(actions as unknown as STRK20_ACTION[])) as unknown as Record<string, unknown>;
+    console.info(`[${logTag}] wallet response (direct)`, res);
+    return { transaction_hash: res.transaction_hash as string | undefined, hash: res.hash as string | undefined, path: "direct", raw: res };
+  } catch (e) {
+    if (!isInvalidRequestPayloadError(e)) throw e;
+    console.warn(
+      `[${logTag}] direct strk20Invoke rejected (INVALID_REQUEST_PAYLOAD); trying prepare -> addInvokeTransaction`,
+      e instanceof Error ? e.message : String(e),
+    );
+    const prepared = await account.strk20PrepareInvoke(actions as unknown as STRK20_ACTION[], false);
+    let preparedSafe: unknown = null;
+    try {
+      preparedSafe = JSON.parse(JSON.stringify(prepared, (_k, v) => (typeof v === "bigint" ? String(v) : v)));
+    } catch {
+      preparedSafe = "(unsanitizable prepare response)";
+    }
+    console.info(`[${logTag}] wallet_strk20PrepareInvoke response`, preparedSafe);
+    const calls = toStarknetCallsFromPrepared((prepared as unknown as { call: unknown }).call);
+    const res2 = (await account.executeWithProof(calls as never, (prepared as unknown as { proof: unknown }).proof as never)) as unknown as Record<string, unknown>;
+    console.info(`[${logTag}] wallet_addInvokeTransaction response (prepared)`, res2);
+    return { transaction_hash: res2.transaction_hash as string | undefined, hash: res2.hash as string | undefined, path: "prepare-then-invoke", raw: res2 };
+  }
 }
 
 /**

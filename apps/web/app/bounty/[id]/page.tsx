@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { Contract, validateAndParseAddress } from "starknet";
-import { connectWallet, createStrk20Account, type Address } from "@/strk20-proof/strk20-proof";
+import { connectWallet, createStrk20Account, strk20InvokeBareActions, type Address } from "@/strk20-proof/strk20-proof";
 import { createProvider, VERITY_NETWORKS } from "@/lib/starknet";
 import { CONTRACTS } from "@/lib/contracts";
 import { STRK20 } from "@/lib/strk20";
@@ -967,15 +967,14 @@ export default function BountyDetailPage() {
         evidenceFelt,
         preimageHex: preimage,
       });
-      console.info("[submitPrivate] STRK20 action array", JSON.stringify([
-        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: ["SUBMIT_PRIVATE", String(id), "0x0", "<nonce>", "<evidence>", "<preimage-single-use>"] },
-      ]));
+      // Bare invoke (no value leg): submitted via the shared fallback chain
+      // (direct -> prepare+addInvoke); the helper logs the exact request.
       try {
-        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        const res = await strk20InvokeBareActions({ account, actions: actionArray, logTag: "submitPrivate", context: { bountyId: Number(id), pool: POOL, token: STRK20[NETWORK].strkTokenAddress } });
         const h = res.transaction_hash ?? res.hash;
         const { next } = consumePreimage(local); // advance ONLY after wallet acceptance
         setStoredIdentity(next);
-        console.info("[submitPrivate] wallet response", res);
+        console.info("[submitPrivate] accepted via", res.path);
         return h;
       } catch (e: any) {
         console.error("[submitPrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
@@ -1016,16 +1015,14 @@ export default function BountyDetailPage() {
         payoutLockHex: lock,
         preimageHex: preimage,
       });
-      console.info("[registerPayoutPrivate] STRK20 action array", JSON.stringify([
-        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: ["REGISTER_PAYOUT", String(id), "0x0", "<nonce>", "<payout-lock>", "<preimage-single-use>"] },
-      ]));
+      // Bare invoke (no value leg): shared fallback chain logs the request.
       try {
-        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        const res = await strk20InvokeBareActions({ account, actions: actionArray, logTag: "registerPayoutPrivate", context: { bountyId: Number(id), pool: POOL } });
         const h = res.transaction_hash ?? res.hash;
         const { next } = consumePreimage(local);
         setStoredIdentity(next);
         savePayoutSecret(Number(id), secret);
-        console.info("[registerPayoutPrivate] wallet response", res);
+        console.info("[registerPayoutPrivate] accepted via", res.path);
         return h;
       } catch (e: any) {
         console.error("[registerPayoutPrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
@@ -1094,8 +1091,8 @@ export default function BountyDetailPage() {
         actionCount: actionArray.length,
       });
       try {
-        const res: any = await account.strk20InvokeTransaction(actionArray);
-        console.info("[refund] wallet response", res);
+        const res = await strk20InvokeBareActions({ account, actions: actionArray, logTag: "refund", context: { bountyId, pool: POOL } });
+        console.info("[refund] accepted via", res.path);
         return res.transaction_hash ?? res.hash;
       } catch (e: any) {
         console.error("[refund] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));

@@ -2290,3 +2290,176 @@ rejects decimal calldata — `invalid dec string` — same hex discipline.)
   writes, pending-identity stake recovery`). Pushed
   `38787c8..4cef16f main -> main`; verified `main...origin/main` in sync
   and live `git ls-remote origin main` returns `4cef16f`.
+
+## 45. BARE-INVOKE 114 — PRE-CHANGE REPORT (2026-09-08, Muse Spark)
+
+Production blocker: `wallet_strk20InvokeTransaction` bare invokes rejected
+by Ready backend (`privacy.strk20Invoke`, `Strk20WalletApiError`,
+`INVALID_REQUEST_PAYLOAD`, HTTP 500). Affected: private submit (page
+`submitPrivate`), private create (`handleCreatePrivate`); same shape also
+used by `registerPayoutPrivate` and `refund` (untested, presumed affected).
+Working and frozen: fund, stake, state refresh, gating.
+
+### 45.1 Root-cause hypothesis
+
+Ready's `privacy.strk20Invoke` backend requires >= 1 note-touching action
+(`deposit`/`withdraw`/`transfer`) in the actions list and rejects
+invoke-only lists as INVALID_REQUEST_PAYLOAD. Rationale: a private tx must
+anchor fees/notes; with no value leg the assembler has nothing to prove.
+This is a BACKEND limitation, not protocol illegality: the pinned
+starknet-privacy `bc75e4b` phase machine (`actions.cairo`) permits
+`InvokeExternal` alone (phase 7 >= start, max one invoke), and our Cairo
+helper explicitly codes bare `SUBMIT_PRIVATE`/`CREATE_BOUNTY` branches
+(amount/evidence/preimage and reward/metadata/alias slots, empty
+`OpenNoteDeposit` span). starknet.js forwards `actions` verbatim
+(`dist/index.js` `strk20InvokeTransaction`: `params: { actions }`, no
+transform), so the wallet receives exactly what the builders emit.
+
+### 45.2 WORKING stake shape (reference, frozen)
+
+`[{type:'withdraw', token:<STRK>, amount:<stakeWei hex>, recipient:<helper>},
+  {type:'invoke', contract:<helper>,
+   calldata:[OP_STAKE, 0x0, <stakeWei>, <nonce>, 0x0, <identity>]}]`
+FUND is the same sandwich with `OP_FUND`. Both accepted repeatedly.
+
+### 45.3 FAILING create shape
+
+`[{type:'invoke', contract:<helper>,
+   calldata:[OP_CREATE, 0x0, <rewardWei>, <nonce>, <metadata>, <alias>]}]`
+6 slots match the deployed helper exactly
+(`BOUNTY_MUST_BE_ZERO`/`AMOUNT_ZERO`/`METADATA_ZERO`/`ALIAS_ZERO` asserts).
+
+### 45.4 FAILING submit shape
+
+`[{type:'invoke', contract:<helper>,
+   calldata:[OP_SUBMIT, <bountyId>, 0x0, <nonce>, <evidence>, <preimage>]}]`
+6 slots match the deployed helper exactly
+(`AMOUNT_MUST_BE_ZERO`/`EVIDENCE_ZERO`/`PREIMAGE_ZERO` asserts).
+
+### 45.5 Difference
+
+Only discriminator: ABSENCE of any deposit/withdraw/transfer leg. Same
+target contract, same 6-slot convention, same felt validity (all
+`toFeltHex`-normalized; uppercase OP_ constants proven acceptable by
+working stake), same account/chain/wallet method. Nonce-zero ruled out
+(1/2^32 per call, failures repeat). starknet.js-version ruled out (same
+method works for stake).
+
+### 45.6 Spec rule
+
+Installed `@starknet-io/types-js` allows `STRK20_ACTION =
+deposit|withdraw|transfer|invoke` (min-1 list) and documents `invoke` as
+"part of the same STRK20 transaction"; the official anatomy guide's
+sandwich is always pool-withdraws -> helper-acts -> approve ->
+`Span<OpenNoteDeposit>`; `AddInvokeTransactionParameters` carries optional
+`proof?: STRK20_PROOF` "required when submitting a STRK20 call produced by
+`wallet_strk20PrepareInvoke`" — the spec-sanctioned two-step path that
+bypasses the direct-submit assembler.
+
+### 45.7 Git regression
+
+NONE in the builders. Bare invoke since introduction: submit in `8361a5d`,
+private create in `0faa42e`; `0faa42e..38787c8` diff on `identity-pure.ts`
+touches no withdraw/transfer/invoke lines. `strk20.json` contains ZERO
+bare-invoke tx hashes; Gate 2 never executed a wallet bare-invoke
+(Gate 2 stayed NO, then the autonomous jump). "Create worked earlier" =
+PUBLIC create (`wallet_addInvokeTransaction`), a different flow. CORRECTION:
+`docs/PRIVATE_INVESTIGATOR.md` line ~43 "bare-invoke pattern proven by
+Gate 2" is UNSUPPORTED and will be struck in this change.
+
+### 45.8 Fix design (smallest, no contract change, working flows frozen)
+
+New shared `strk20InvokeBareActions` fallback chain for the 4 bare-invoke
+flows (submit, register-payout, refund, private-create): (1) direct
+`strk20InvokeTransaction` (unchanged shape; keeps working if backend
+behavior changes; fails fast pre-prompt today); (2) ONLY on
+INVALID_REQUEST_PAYLOAD, `strk20PrepareInvoke(actions, false)` ->
+`executeWithProof([mappedCall], proof)` (spec two-step path; single wallet
+prompt). All other errors (USER_REFUSED, NOT_REGISTERED, INSUFFICIENT_*)
+propagate immediately, no second prompt. Fund/stake/unstake/claim call
+sites byte-identical. Plus exact-request sanitized logging (method,
+versions, per-action types/contracts/calldata with per-item
+index/value/typeof, OPEN/placeholders verbatim, secret slot redacted)
+immediately before each wallet call.
+
+## 46. BARE-INVOKE 114 — IMPLEMENTATION + VERIFICATION (2026-09-08)
+
+### 46.1 Files changed
+
+- `apps/web/lib/identity-pure.ts` (+130): `SECRET_CALLDATA_SLOT`,
+  `isInvalidRequestPayloadError`, `Strk20LoggedAction`,
+  `sanitizeStrk20ActionsForLog`, `logStrk20Request`,
+  `toStarknetCallsFromPrepared`. Builders (`buildStake/Submit/RegPayout/
+  Unstake/CreateActions`) and OP_ constants byte-identical.
+- `apps/web/strk20-proof/strk20-proof.ts` (+71):
+  `strk20InvokeBareActions` (direct -> prepare+addInvoke fallback, exact
+  sanitized logging before each wallet call) + `Strk20SubmitResult`.
+- `apps/web/app/bounty/[id]/page.tsx` (3 hunks only): `submitPrivate`,
+  `registerPayoutPrivate`, `refund` routed through the helper. `fundPrivate`,
+  `stakePrivate`, `unstakePrivate`, `claim`, gating, refresh: zero hunks.
+- `apps/web/app/create/page.tsx` (1 hunk): `handleCreatePrivate` routed
+  through the helper. Public create path untouched.
+- `apps/web/lib/identity.regression.test.ts` (+87): classifier (incl. the
+  exact production error shape + 114-in-hash non-false-positive),
+  sanitizer (stake exact shape, OPEN/placeholder verbatim, secret-slot
+  redaction, failing-submit exact shape), prepared-call mapping + malformed
+  throws.
+- `docs/PRIVATE_INVESTIGATOR.md`: struck the unsupported "proven by Gate 2"
+  claim (1 line).
+- `docs/AI_HANDOFF.md`: §45 pre-change report + this §46.
+
+### 46.2 Exact request-shape change
+
+Nothing about the OUTGOING direct shape changed (same builders, same
+felts) — the fix adds (a) exact pre-call sanitized logging and (b) a
+second, spec-sanctioned submission path for the same actions:
+`strk20PrepareInvoke(actions, false)` -> `executeWithProof([mappedCall],
+proof)`. No contract change, no new fields, no invented schema, no
+hex-normalization of OPEN/placeholders, no dependency change.
+
+### 46.3 Why the new path should be accepted
+
+Direct submit already proves the actions reach `privacy.strk20Invoke`;
+the 114 comes from that endpoint's assembler, not from malformed fields.
+The two-step path uses the wallet's own prepare endpoint (which assembles
+the pool call server-side) plus the spec-documented proof-carrying
+`wallet_addInvokeTransaction`. If prepare accepts, the tx submits with
+zero contract changes. If prepare ALSO returns 114, that proves bare
+invokes are unprovable backend-side and the REQUIRED next step is a
+contract redesign (value-anchored SUBMIT/CREATE ops + redeploy) — the
+console chain (`direct rejected -> prepare ... -> addInvoke ...`) will
+show exactly which leg failed.
+
+### 46.4 Tests run (all green, none wallet-dependent)
+
+- `node --test bounty+identity`: **82/82 pass** (76 before + 6 new).
+- `tsc --noEmit`: exit 0. `next build`: 7/7 routes.
+- Mock-walletProvider run against the REAL installed starknet@10.5.0
+  `WalletAccountV6`: direct-114 -> prepare `{actions, simulate:false}` ->
+  addInvoke `{calls:[{contract_address, entry_point, calldata}], proof}` ->
+  `{transaction_hash}`; request order verified. (The helper mirrors this
+  sequence 1:1; its pure units are covered by the 82 tests. Raw-Node import
+  of the TS helper was blocked by extensionless ESM resolution, hence the
+  surface-level mock instead — recorded honestly.)
+- Frozen-flow audit via `git diff`: fund/stake/unstake/claim call sites
+  have ZERO hunks; only the 4 bare-invoke sites changed.
+
+### 46.5 Browser/wallet verification actually performed: NONE
+
+No signatures were produced by this agent. Per the testing requirement:
+(A) create-private reaching wallet without 114 — NOT VERIFIED;
+(B) submit-private reaching wallet without 114 — NOT VERIFIED;
+(C)-(E) tx accepted/on-chain/contract success — NOT VERIFIED;
+(F)-(I) stake/fund/refresh/gating still succeeding — NOT VERIFIED
+(unchanged code paths + green static suite only). DO NOT treat this
+change as "fixed" until the user clicks through: the console will now
+show the exact `[tag] wallet_strk20InvokeTransaction request` object,
+then either `wallet response (direct)` or the prepare chain with
+`accepted via: direct|prepare-then-invoke`. Report those lines verbatim
+plus any new error and the Voyager hash on success.
+
+### 46.6 Deployed addresses / commit
+
+Unchanged V3 (BM `0x04315e84...`, helper `0x03602dc4...`, STRK
+`0x04718f...`, pool `0x0254...`). Commit for this checkpoint: (recorded
+after push below).

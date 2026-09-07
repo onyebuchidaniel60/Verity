@@ -32,6 +32,10 @@ import {
   clearIdentity,
   markIdentityConfirmed,
   generateIdentitySeed,
+  isInvalidRequestPayloadError,
+  sanitizeStrk20ActionsForLog,
+  toStarknetCallsFromPrepared,
+  SECRET_CALLDATA_SLOT,
 } from "./identity-pure.ts";
 
 // Node has no localStorage: minimal in-memory stub so the real
@@ -346,5 +350,88 @@ describe("investigator-state refresh (stake -> eligible without reload)", () => 
     assert.equal(reloaded!.confirmed, true);
     assert.equal(reloaded!.seed, seed);
     clearIdentity();
+  });
+});
+
+describe("bare-invoke diagnostics (submit/create 114)", () => {
+  it("classifies the production Strk20WalletApiError shape", () => {
+    const prod = {
+      name: "WalletRPCError",
+      message: "An error occurred (INVALID_REQUEST_PAYLOAD)",
+      data: { code: "INVALID_REQUEST_PAYLOAD", httpStatus: 500, path: "privacy.strk20Invoke", name: "Strk20WalletApiError" },
+      cause: { message: "An error occurred (INVALID_REQUEST_PAYLOAD)" },
+    };
+    assert.equal(isInvalidRequestPayloadError(prod), true);
+    assert.equal(isInvalidRequestPayloadError({ code: 114 }), true);
+    assert.equal(isInvalidRequestPayloadError({ code: "114" }), true);
+    assert.equal(isInvalidRequestPayloadError({ data: { cause: { code: 114 } } }), true);
+  });
+  it("does not misclassify other failures (no fallback prompt storms)", () => {
+    assert.equal(isInvalidRequestPayloadError(new Error("USER_REFUSED")), false);
+    assert.equal(isInvalidRequestPayloadError({ code: 118, message: "NOT_REGISTERED" }), false);
+    assert.equal(isInvalidRequestPayloadError({ message: "INSUFFICIENT_PRIVATE_BALANCE" }), false);
+    assert.equal(isInvalidRequestPayloadError(null), false);
+    assert.equal(isInvalidRequestPayloadError(undefined), false);
+    // A tx hash containing "114" must NOT trigger the fallback path.
+    assert.equal(isInvalidRequestPayloadError({ message: "tx 0xab114cd failed" }), false);
+    assert.equal(isInvalidRequestPayloadError({ block: 114 }), false);
+  });
+  it("sanitizer logs the exact stake request with secret slot redacted", () => {
+    const stake = buildStakeActions({
+      helper: "0x03602dc4",
+      token: "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+      stakeWei: "1000000000000000000",
+      identityHex: VECTORS["0x1234"].c64,
+      nonceHex: "0x1",
+    });
+    const s = sanitizeStrk20ActionsForLog(stake);
+    assert.equal(s.length, 2);
+    assert.equal(s[0].type, "withdraw");
+    assert.equal(s[0].amount, "0xde0b6b3a7640000");
+    assert.equal(s[1].type, "invoke");
+    assert.equal(s[1].calldata!.length, 6);
+    assert.deepEqual(s[1].calldata![0], { index: 0, value: OP_STAKE, jsType: "string", chars: OP_STAKE.length });
+    // Secret slot redacted, length preserved for shape correlation.
+    assert.equal(s[1].calldata![SECRET_CALLDATA_SLOT].value, "<secret-redacted>");
+    assert.equal(s[1].calldata![SECRET_CALLDATA_SLOT].chars, VECTORS["0x1234"].c64.length);
+    assert.deepEqual(s[1].extraKeys, []);
+  });
+  it("sanitizer passes OPEN and placeholders through verbatim with types", () => {
+    const un = buildUnstakeActions({
+      helper: "0x03602dc4",
+      token: "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+      selfAddress: "0xabc",
+      preimageHex: VECTORS["0x1234"].c63,
+      nonceHex: "0x4",
+    });
+    const s = sanitizeStrk20ActionsForLog(un);
+    assert.equal(s[0].amount, "OPEN"); // never hex-normalized
+    const invokeCd = s[1].calldata!;
+    assert.equal(invokeCd[4].value, "${openNoteIds[0]}"); // placeholder verbatim
+    assert.equal(invokeCd[4].jsType, "string");
+    assert.equal(invokeCd[3].value, "0x4"); // nonce fully visible
+    assert.equal(invokeCd[5].value, "<secret-redacted>"); // preimage hidden
+  });
+  it("sanitizer captures the exact failing submit shape (bare invoke)", () => {
+    const sub = buildSubmitActions({ helper: "0x03602dc4", bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63, nonceHex: "0x2" });
+    const s = sanitizeStrk20ActionsForLog(sub);
+    assert.equal(s.length, 1); // invoke-only: the rejected shape
+    assert.equal(s[0].type, "invoke");
+    assert.deepEqual(s[0].calldata!.map((c) => c.value), [OP_SUBMIT, "0x3", "0x0", "0x2", "0x6576", "<secret-redacted>"]);
+  });
+  it("prepared-call mapping round-trips wallet shape to starknet shape", () => {
+    const calls = toStarknetCallsFromPrepared({
+      contract_address: "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
+      entry_point: "execute",
+      calldata: ["0x1", "0x2"],
+    });
+    assert.deepEqual(calls, [{
+      contractAddress: "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
+      entrypoint: "execute",
+      calldata: ["0x1", "0x2"],
+    }]);
+    assert.throws(() => toStarknetCallsFromPrepared(null), /malformed call/);
+    assert.throws(() => toStarknetCallsFromPrepared({ contract_address: "0x1" }), /malformed call/);
+    assert.throws(() => toStarknetCallsFromPrepared({ contract_address: "0x1", entry_point: "x", calldata: "nope" }), /malformed call/);
   });
 });
