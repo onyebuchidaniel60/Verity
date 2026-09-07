@@ -10,6 +10,13 @@ import { CONTRACTS } from "@/lib/contracts";
 import { STRK20 } from "@/lib/strk20";
 import { useWalletStore } from "@/store/wallet";
 import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus, statusMeta, toHexAddress, getSubmissionStatusName, generateSecret, computeLock, saveBountySecrets, getBountySecrets, savePayoutSecret, getPayoutSecret } from "@/lib/bounty";
+import {
+  OP_STAKE, OP_SUBMIT, OP_REG_PAYOUT, OP_UNSTAKE,
+  genesisTip, peekPreimage, consumePreimage, identityShortId, normFelt,
+  generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity,
+  evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
+  buildUnstakeActions, type StoredIdentity,
+} from "@/lib/identity-pure";
 
 const NETWORK = "sepolia" as const;
 const POOL = STRK20[NETWORK].poolAddress as Address;
@@ -18,6 +25,19 @@ const POOL = STRK20[NETWORK].poolAddress as Address;
 const OP_FUND = "0x46554e445f424f554e5459"; // 'FUND_BOUNTY'
 const OP_REFUND = "0x524546554e445f424f554e5459"; // 'REFUND_BOUNTY'
 const OP_RELEASE = "0x52454c45415345"; // 'RELEASE'
+// Private investigator identity ops live in @/lib/identity-pure (OP_STAKE,
+// OP_SUBMIT, OP_REG_PAYOUT, OP_UNSTAKE) so unit tests pin them to the
+// contract short-strings.
+const IDENTITY_ABI = [
+  { name: "get_identity_reputation", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "rep", type: "core::integer::u64" }], stateMutability: "view" },
+  { name: "is_identity_registered", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "registered", type: "core::bool" }], stateMutability: "view" },
+  { name: "is_identity_slashed", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "slashed", type: "core::bool" }], stateMutability: "view" },
+  { name: "is_identity_eligible", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "eligible", type: "core::bool" }], stateMutability: "view" },
+  { name: "get_identity_stake", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "amount", type: "core::integer::u128" }], stateMutability: "view" },
+  { name: "get_minimum_reputation", type: "function", inputs: [], outputs: [{ name: "min", type: "core::integer::u64" }], stateMutability: "view" },
+  { name: "get_stake_amount", type: "function", inputs: [], outputs: [{ name: "amt", type: "core::integer::u128" }], stateMutability: "view" },
+  { name: "challenge_private_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+] as const;
 const LOCKS_ABI = [
   { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
   { name: "register_payout_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
@@ -85,6 +105,10 @@ export default function BountyDetailPage() {
   const [locksInfo, setLocksInfo] = useState<{ hasFundLock: boolean; hasRefundLock: boolean; hasPayoutLock: boolean; escrowWei: bigint } | null>(null);
   const [connectedAddr, setConnectedAddr] = useState<string | null>(null);
   const [stakeInfo, setStakeInfo] = useState<{ hasStake: boolean; stakeAmount: string; reputation: number; minRep: number; isSlashed: boolean } | null>(null);
+  // Private investigator identity (device-held seed; chain state is the source
+  // of truth for eligibility — localStorage only holds the secret seed).
+  const [storedIdentity, setStoredIdentity] = useState<StoredIdentity | null>(null);
+  const [identityInfo, setIdentityInfo] = useState<{ identity: string; registered: boolean; reputation: number; minRep: number; escrowWei: bigint; eligible: boolean; slashed: boolean; stakeAmountWei: bigint } | null>(null);
   const [reportReason, setReportReason] = useState("");
   const [selectedSubmission, setSelectedSubmission] = useState<number | null>(null);
   const [reportsMap, setReportsMap] = useState<Record<number, any>>({});
@@ -159,8 +183,10 @@ export default function BountyDetailPage() {
           try {
             const s: any = await cSub.call("get_submission", [id, i]);
             const subRaw = s?.submission ?? s;
+            // New Submission shape appends `identity` (index 6; 0 = legacy
+            // wallet submission). Old deployments return 6 members → undefined.
             const sub = Array.isArray(subRaw)
-              ? { id: subRaw[0], bounty_id: subRaw[1], investigator: subRaw[2], evidence_hash: subRaw[3], timestamp: subRaw[4], status: subRaw[5] }
+              ? { id: subRaw[0], bounty_id: subRaw[1], investigator: subRaw[2], evidence_hash: subRaw[3], timestamp: subRaw[4], status: subRaw[5], identity: subRaw[6] }
               : subRaw;
             list.push({ id: i, ...sub });
           } catch {}
@@ -212,7 +238,43 @@ export default function BountyDetailPage() {
           setStakeInfo(null);
         }
       }
-      // Load helper funding locks + escrow (public views; drive fund/refund/claim UI).
+      // Load private investigator identity state (device seed + chain views).
+      // The seed never leaves this device; eligibility comes from chain views
+      // keyed by the identity commitment (no wallet linkage on-chain).
+      try {
+        const local = loadIdentity();
+        setStoredIdentity(local);
+        if (local) {
+          const cId = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+          const [repRes, regRes, slashedRes, eligRes, escRes, minRes, amtRes]: any = await Promise.all([
+            cId.call("get_identity_reputation", [local.identity]),
+            cId.call("is_identity_registered", [local.identity]),
+            cId.call("is_identity_slashed", [local.identity]),
+            cId.call("is_identity_eligible", [local.identity]),
+            cId.call("get_identity_stake", [local.identity]),
+            cId.call("get_minimum_reputation", []),
+            cId.call("get_stake_amount", []),
+          ]);
+          const toBool = (r: any) => {
+            const v = r?.eligible ?? r?.registered ?? r?.slashed ?? r;
+            return v === true || v === 1 || v === 1n || String(v).toLowerCase() === "true";
+          };
+          setIdentityInfo({
+            identity: local.identity,
+            registered: toBool(regRes),
+            reputation: Number(repRes?.rep ?? repRes ?? 0),
+            minRep: Number(minRes?.min ?? minRes ?? 60),
+            escrowWei: BigInt(escRes?.amount ?? escRes ?? 0),
+            eligible: toBool(eligRes),
+            slashed: toBool(slashedRes),
+            stakeAmountWei: BigInt(amtRes?.amt ?? amtRes ?? 0),
+          });
+        } else {
+          setIdentityInfo(null);
+        }
+      } catch {
+        setIdentityInfo(null);
+      }
       try {
         const cLocks: any = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: provider });
         const [hasFund, hasRefund, hasPayout, escrow]: any = await Promise.all([
@@ -331,7 +393,19 @@ export default function BountyDetailPage() {
       if (rawMsg.includes("USER_REFUSED") || msgLower.includes("user rejected") || msgLower.includes("cancelled")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
       else if (msgLower.includes("not_registered") || msgLower.includes("118")) setError("Your wallet isn’t registered for private transactions yet. Open your wallet, enable private mode, and try again.");
       else if (msgLower.includes("insufficient") || msgLower.includes("balance") || msgLower.includes("insufficient_private_balance")) setError("Insufficient funds. Make sure you have enough STRK and try again.");
-      else if (msgLower.includes("not_staked")) setError("You need to stake before you can submit. Stake the required amount to become eligible.");
+      else if (msgLower.includes("not_staked")) setError("You need to stake before you can submit. Stake privately to create your investigator identity, then submit.");
+      else if (msgLower.includes("not_registered_identity") || msgLower.includes("unknown_preimage")) setError("Investigator identity not recognized. Stake privately first on this device.");
+      else if (msgLower.includes("bad_preimage") || msgLower.includes("preimage_zero")) setError("Identity authorization failed. Reload and try again — if it persists, your local identity may be out of sync.");
+      else if (msgLower.includes("stake_not_backed")) setError("Stake was not backed by shielded funds. Make sure your private balance covers the stake and try again.");
+      else if (msgLower.includes("stake_active")) setError("This investigator identity already has an active stake.");
+      else if (msgLower.includes("no_stake")) setError("No active private stake found for this identity.");
+      else if (msgLower.includes("is_slashed_cannot_withdraw") || msgLower.includes("is_slashed_cannot_stake")) setError("Slashed identities can’t withdraw or re-stake. The stake was forfeited to the protocol.");
+      else if (msgLower.includes("not_private_submission")) setError("This challenge path is only for private submissions.");
+      else if (msgLower.includes("already_challenged")) setError("This report has already been challenged.");
+      else if (msgLower.includes("challenge_expired")) setError("The 3-day challenge window has closed.");
+      else if (msgLower.includes("identity_zero")) setError("Invalid investigator identity. Reload and try again.");
+      else if (msgLower.includes("invalid_op")) setError("Private staking isn’t live on this deployment yet — the new contracts are still being deployed. Basic staking below still works.");
+      else if (msgLower.includes("bounty_must_be_zero") || msgLower.includes("amount_must_be_zero")) setError("Invalid private-transaction payload. Please reload and try again.");
       else if (msgLower.includes("is_slashed")) setError("Your investigator profile has been slashed and can’t submit. Contact support if you believe this is an error.");
       else if (msgLower.includes("reputation_too_low")) setError(`Your reputation is too low. Required: ${stakeInfo?.minRep ?? 60}, yours: ${stakeInfo?.reputation ?? 0}. Build reputation to submit.`);
       else if (msgLower.includes("creator_cannot_submit")) setError("This is your bounty. You can't submit an investigation to your own bounty.");
@@ -585,6 +659,170 @@ export default function BountyDetailPage() {
       return res.transaction_hash ?? res.hash;
     });
 
+  // ---- Private investigator identity flows (STRK20-routed) ----
+  // The seed never leaves this device. Stake/submit/payout-register travel as
+  // pool-routed private transactions carrying only the identity commitment and
+  // single-use preimages — never the wallet address. Challenge is a direct
+  // call from any account (preimage knowledge is the auth).
+
+  const stakePrivate = () =>
+    guard("stakePrivate", async () => {
+      if (loadIdentity()) throw new Error("An investigator identity already exists on this device. Withdraw it first to start over.");
+      const address = await ensureConnected();
+      const { wallet } = await connectWallet();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
+      // Required stake amount is authoritative on-chain.
+      const cId: any = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+      const amtRes: any = await cId.call("get_stake_amount", []);
+      const stakeWei = BigInt(amtRes?.amt ?? amtRes ?? 0).toString();
+      if (BigInt(stakeWei) <= 0n) throw new Error("STAKE_ZERO: no stake amount configured.");
+      try {
+        const balances: any = await account.strk20Balances([STRK20[NETWORK].strkTokenAddress as Address]);
+        const entry = (balances as any[]).find((b: any) => String(b.token).toLowerCase() === STRK20[NETWORK].strkTokenAddress.toLowerCase());
+        if (entry && BigInt(entry.balance) < BigInt(stakeWei)) throw new Error(`INSUFFICIENT_PRIVATE_BALANCE: private balance ${entry.balance} < required stake ${stakeWei}`);
+      } catch (e: any) {
+        if (String(e.message).includes("NOT_REGISTERED") || String(e.message).includes("INSUFFICIENT")) throw e;
+        console.warn("[stakePrivate] private balance check skipped", e?.message);
+      }
+      const seed = generateIdentitySeed();
+      const identity = genesisTip(seed);
+      const actionArray = buildStakeActions({
+        helper: CONTRACTS.verityAnonymizer!,
+        token: STRK20[NETWORK].strkTokenAddress,
+        stakeWei,
+        identityHex: identity,
+      });
+      console.info("[stakePrivate] STRK20 action array", JSON.stringify([
+        { type: "withdraw", amount: stakeWei, recipient: CONTRACTS.verityAnonymizer },
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: ["STAKE_IDENTITY", "0x0", stakeWei, "<nonce>", "0x0", "<identity-commitment>"] },
+      ]));
+      try {
+        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        const h = res.transaction_hash ?? res.hash;
+        // Persist ONLY after the wallet accepts (guard waits for L2, then reloads).
+        saveIdentity({ seed, identity, nextK: 63, backedUp: false });
+        setStoredIdentity({ seed, identity, nextK: 63, backedUp: false });
+        console.info("[stakePrivate] wallet response", res);
+        void address;
+        return h;
+      } catch (e: any) {
+        console.error("[stakePrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
+        throw e;
+      }
+    });
+
+  const submitPrivate = () =>
+    guard("submitPrivate", async () => {
+      const statusName = getStatusName((bounty as any)?.status ?? "Created");
+      if (statusName !== "Open") throw new Error("NOT_OPEN: This bounty is not open for submissions right now.");
+      const local = loadIdentity();
+      if (!local) throw new Error("NOT_STAKED: stake privately first to create your investigator identity.");
+      if (!evidence.trim()) throw new Error("Please add investigation details");
+      await ensureConnected();
+      const { wallet } = await connectWallet();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
+      const evidenceFelt = evidenceToFelt(evidence);
+      const preimage = peekPreimage(local);
+      const actionArray = buildSubmitActions({
+        helper: CONTRACTS.verityAnonymizer!,
+        bountyId: Number(id),
+        evidenceFelt,
+        preimageHex: preimage,
+      });
+      console.info("[submitPrivate] STRK20 action array", JSON.stringify([
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: ["SUBMIT_PRIVATE", String(id), "0x0", "<nonce>", "<evidence>", "<preimage-single-use>"] },
+      ]));
+      try {
+        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        const h = res.transaction_hash ?? res.hash;
+        consumePreimage(local); // advance ONLY after wallet acceptance
+        console.info("[submitPrivate] wallet response", res);
+        return h;
+      } catch (e: any) {
+        console.error("[submitPrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
+        throw e;
+      }
+    });
+
+  const challengePrivate = (submissionId: number) =>
+    guard("challengePrivate", async () => {
+      const local = loadIdentity();
+      if (!local) throw new Error("Identity not found on this device — challenge from the device holding the investigator identity.");
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      // Direct call from ANY account: preimage knowledge is the authorization.
+      const preimage = peekPreimage(local);
+      const c = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
+      const res: any = await c.invoke("challenge_private_report", [id, submissionId, preimage]);
+      consumePreimage(local);
+      return res.transaction_hash ?? res.hash;
+    });
+
+  const registerPayoutPrivate = () =>
+    guard("registerPrivate", async () => {
+      const local = loadIdentity();
+      if (!local) throw new Error("NO_PAYOUT_SECRET: identity not found on this device. Open this page on the device holding the investigator identity.");
+      let secret = getPayoutSecret(Number(id));
+      if (!secret) secret = generateSecret();
+      const { computeLock: lockOf } = await import("@/lib/bounty");
+      const lock = lockOf(secret);
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
+      const preimage = peekPreimage(local);
+      const actionArray = buildRegPayoutActions({
+        helper: CONTRACTS.verityAnonymizer!,
+        bountyId: Number(id),
+        payoutLockHex: lock,
+        preimageHex: preimage,
+      });
+      console.info("[registerPayoutPrivate] STRK20 action array", JSON.stringify([
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: ["REGISTER_PAYOUT", String(id), "0x0", "<nonce>", "<payout-lock>", "<preimage-single-use>"] },
+      ]));
+      try {
+        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        const h = res.transaction_hash ?? res.hash;
+        consumePreimage(local);
+        savePayoutSecret(Number(id), secret);
+        console.info("[registerPayoutPrivate] wallet response", res);
+        return h;
+      } catch (e: any) {
+        console.error("[registerPayoutPrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
+        throw e;
+      }
+    });
+
+  const unstakePrivate = () =>
+    guard("unstakePrivate", async () => {
+      const local = loadIdentity();
+      if (!local) throw new Error("Identity not found on this device.");
+      const { wallet, address } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
+      const preimage = peekPreimage(local);
+      const actionArray = buildUnstakeActions({
+        helper: CONTRACTS.verityAnonymizer!,
+        token: STRK20[NETWORK].strkTokenAddress,
+        selfAddress: address,
+        preimageHex: preimage,
+      });
+      console.info("[unstakePrivate] STRK20 action array", JSON.stringify([
+        { type: "transfer", amount: "OPEN" },
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: ["UNSTAKE_IDENTITY", "0x0", "0x0", "<nonce>", "${openNoteIds[0]}", "<preimage-single-use>"] },
+      ]));
+      try {
+        const res: any = await account.strk20InvokeTransaction(actionArray as any);
+        const h = res.transaction_hash ?? res.hash;
+        consumePreimage(local);
+        console.info("[unstakePrivate] wallet response", res);
+        return h;
+      } catch (e: any) {
+        console.error("[unstakePrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
+        throw e;
+      }
+    });
+
   const refund = () =>
     guard("refund", async () => {
       if (!bounty) throw new Error("Bounty not loaded");
@@ -645,7 +883,11 @@ export default function BountyDetailPage() {
       const winner = (bounty as any)?.winner ?? null;
       const normWinner = winner ? normalizeAddr(String(winner)) : null;
       const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
-      if (normWinner && normConnected && normWinner !== normConnected) throw new Error("NOT_AUTHORIZED_CLAIM: Only the winner can claim this reward");
+      // Private wins are authorized by the payout secret + identity chain, not
+      // by the connected wallet (the recorded winner is a commitment, not a
+      // signer). Legacy wins keep the wallet check.
+      if (!isPrivateWin && normWinner && normConnected && normWinner !== normConnected) throw new Error("NOT_AUTHORIZED_CLAIM: Only the winner can claim this reward");
+      if (isPrivateWin && !isWinnerPrivate) throw new Error("NOT_AUTHORIZED_CLAIM: Only the winning investigator identity (on its device) can claim this reward");
       if (!winner || String(winner) === "0x0" || (winner as any) === 0) throw new Error("No winner selected yet");
       if (!locksInfo?.hasPayoutLock) throw new Error("NO_PAYOUT_LOCK: register your payout claim first (one transaction), then claim privately.");
       const secret = (payoutSecretPaste.trim() || getPayoutSecret(Number(id)) || "").trim();
@@ -742,6 +984,22 @@ export default function BountyDetailPage() {
   const normWinner = normalizeAddr(winnerAddr);
   const isCreator = isCreatorAddr(creatorAddr, connectedAddr);
   const isWinner = !!(normWinner && normConnected && normWinner === normConnected && normWinner !== "0x0000000000000000000000000000000000000000000000000000000000000000");
+  // Private win detection: the winning submission carries an identity
+  // commitment (never a wallet). The local device matches by identity, not
+  // by wallet address.
+  const winningSub = submissions.find((s: any) => Number(s.id) === Number((bounty as any)?.winningSubmission));
+  const winningSubIdentity = (() => {
+    const raw = (winningSub as any)?.identity ?? (winningSub as any)?.[6];
+    const n = normFelt(raw != null ? String(raw) : null);
+    if (!n) return null;
+    try {
+      return BigInt(n) === 0n ? null : n;
+    } catch {
+      return null;
+    }
+  })();
+  const isPrivateWin = !!winningSubIdentity;
+  const isWinnerPrivate = !!(isPrivateWin && storedIdentity && normFelt(storedIdentity.identity)?.toLowerCase() === (winningSubIdentity as string).toLowerCase());
   // Creator device secrets (fund/refund set at creation or lock time; payout
   // by the winner at claim time). Plaintexts never leave this device except
   // inside the private-tx calldata that consumes them. Never logged.
@@ -845,54 +1103,88 @@ export default function BountyDetailPage() {
         </div>
       )}
 
-      {/* Investigator staking panel (interim V2 on-chain requirement).
-          The submission form below is NOT gated by this panel: any connected
-          non-creator can submit to an OPEN bounty. If the chain reverts with
-          NOT_STAKED, stake here in one click and retry. */}
+      {/* Investigator eligibility — private staking first, basic staking fallback.
+          Private identity: stake travels as a shielded STRK20 transaction bound
+          to an identity commitment. No wallet address is recorded on-chain;
+          Verity only learns eligible / not eligible. The seed lives on this
+          device only — back it up. Legacy one-click staking still works
+          on-chain (regression path) but is public. */}
       {!isCreator && isOpen && (
-        <div className="card card-pad" style={{ marginBottom: 16, borderColor: eligibility?.eligible ? "var(--border)" : "var(--amber-border)" }}>
-          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Investigator staking (one-click, interim)</h3>
-          {!connectedAddr ? (
-            <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>Connect your wallet to check eligibility.</p>
-          ) : !eligibility ? (
+        <div className="card card-pad" style={{ marginBottom: 16, borderColor: identityInfo?.eligible ? "var(--border)" : "var(--amber-border)" }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 8px" }}>Investigator eligibility</h3>
+          {!storedIdentity ? (
+            <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
+              <p style={{ margin: 0, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                Stake privately to participate. Your investigator identity and stake remain private
+                while Verity verifies that you are eligible. A small privacy fee applies.
+              </p>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-muted)" }}>Required stake</span>
+                <span style={{ fontWeight: 600 }}>{identityInfo?.stakeAmountWei ? formatReward(identityInfo.stakeAmountWei.toString()) : (eligibility ? eligibility.stakeAmountStr : "1 STRK")}</span>
+              </div>
+              <button disabled={!!busy} onClick={stakePrivate} className="btn btn-primary" style={{ marginTop: 4 }}>
+                {busy === "stakePrivate" ? "Confirm in wallet…" : "Stake privately"}
+              </button>
+              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>
+                After staking, this device holds your investigator identity — back it up when shown.
+                Submissions, reputation and rewards link to that identity, not your wallet.
+              </p>
+              {!eligibility?.hasStake && (
+                <details style={{ fontSize: 12 }}>
+                  <summary style={{ cursor: "pointer", color: "var(--text-muted)" }}>Basic (public) staking instead</summary>
+                  <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                    <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>Public fallback: links your wallet address on-chain. Private staking above is recommended.</p>
+                    <button disabled={!!busy} onClick={stake} className="btn btn-ghost">
+                      {busy === "stake" ? "Staking…" : `Stake publicly${eligibility ? ` (${eligibility.stakeAmountStr})` : ""}`}
+                    </button>
+                  </div>
+                </details>
+              )}
+            </div>
+          ) : !identityInfo ? (
             <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>Loading eligibility…</p>
-          ) : eligibility.isSlashed ? (
+          ) : identityInfo.slashed ? (
             <div className="alert alert-error" style={{ margin: 0 }}>
               <span>⚠</span>
-              <div><strong>Profile slashed</strong><div style={{ opacity: 0.85, marginTop: 4 }}>You can’t submit investigations while slashed.</div></div>
+              <div><strong>Identity slashed</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Investigator {identityShortId(identityInfo.identity)} can’t submit. The stake was forfeited.</div></div>
             </div>
           ) : (
             <div style={{ display: "grid", gap: 6, fontSize: 13 }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-muted)" }}>Investigator</span>
+                <span style={{ fontWeight: 600 }}>Anonymous {identityShortId(identityInfo.identity)}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-muted)" }}>Private stake</span>
+                <span>{identityInfo.registered && identityInfo.escrowWei > 0n ? `${formatReward(identityInfo.escrowWei.toString())} ✓ Verified` : "Not found ✗"}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span style={{ color: "var(--text-muted)" }}>Reputation</span>
-                <span style={{ fontWeight: 600 }}>{eligibility.reputation} / 100 {eligibility.reputation >= eligibility.minRep ? "✓" : "✗"}</span>
+                <span style={{ fontWeight: 600 }}>{identityInfo.reputation} / 100 {identityInfo.reputation >= identityInfo.minRep ? "✓" : "✗"}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span style={{ color: "var(--text-muted)" }}>Required</span>
-                <span>{eligibility.minRep}</span>
+                <span>{identityInfo.minRep}</span>
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: "var(--text-muted)" }}>Stake</span>
-                <span>{eligibility.hasStake ? `${eligibility.stakeAmountStr} ✓` : `${eligibility.stakeAmountStr} — not staked ✗`}</span>
+              <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600, color: identityInfo.eligible ? "var(--text)" : "var(--amber)" }}>
+                {identityInfo.eligible ? "✓ Eligible — you can submit an investigation" : "✗ Not eligible yet"}
               </div>
-              <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600, color: eligibility.eligible ? "var(--text)" : "var(--amber)" }}>
-                {eligibility.eligible ? "✓ Eligible to submit" : "✗ Not eligible — stake or build reputation"}
-              </div>
-              {!eligibility.hasStake && (
-                <button disabled={!!busy} onClick={stake} className="btn btn-secondary" style={{ marginTop: 8 }}>
-                  {busy === "stake" ? "Staking…" : `Stake ${eligibility.stakeAmountStr} to become eligible`}
-                </button>
+              {!storedIdentity.backedUp && identityInfo.registered && (
+                <div className="alert alert-warn" style={{ margin: "6px 0 0" }}>
+                  <span>◈</span>
+                  <div><strong>Back up this device’s identity</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Your investigator identity lives only here. Clearing browser data without a backup locks the stake.</div></div>
+                </div>
               )}
-              {eligibility.hasStake && !eligibility.isSlashed && (
-                <button disabled={!!busy} onClick={withdrawStake} className="btn btn-ghost" style={{ marginTop: 8, fontSize: 12 }}>
-                  {busy === "withdraw" ? "Withdrawing…" : "Withdraw stake"}
+              {identityInfo.registered && identityInfo.escrowWei > 0n && !identityInfo.slashed && (
+                <button disabled={!!busy} onClick={unstakePrivate} className="btn btn-ghost" style={{ marginTop: 8, fontSize: 12 }}>
+                  {busy === "unstakePrivate" ? "Withdrawing…" : "Withdraw stake privately"}
                 </button>
               )}
             </div>
           )}
-          {eligibility && !eligibility.eligible && !eligibility.isSlashed && (
+          {identityInfo && !identityInfo.eligible && !identityInfo.slashed && (
             <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "8px 0 0", lineHeight: 1.4 }}>
-              {eligibility.reputation < eligibility.minRep ? `You need a higher reputation (have ${eligibility.reputation}, need ${eligibility.minRep}). Wins increase reputation; slashes reduce it.` : "Stake the required amount to submit."}
+              {identityInfo.reputation < identityInfo.minRep ? `Reputation too low (have ${identityInfo.reputation}, need ${identityInfo.minRep}). Wins increase reputation; slashes reduce it.` : "Stake is still confirming — reload in a moment."}
             </p>
           )}
         </div>
@@ -998,8 +1290,11 @@ export default function BountyDetailPage() {
               <label className="label" htmlFor="evidence">Your investigation</label>
               <textarea id="evidence" className="textarea" rows={4} placeholder="Describe your findings…" value={evidence} onChange={(e) => setEvidence(e.target.value)} />
               <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>I understand that submitting a fraudulent or misleading investigation may result in loss of my stake.</p>
-              <button disabled={!!busy} onClick={submit} className="btn btn-primary">
-                {busy === "submit" ? "Submitting…" : "Submit investigation"}
+              {identityInfo?.eligible && (
+                <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>Submitting as Anonymous {identityShortId(identityInfo.identity)} — your wallet stays private.</p>
+              )}
+              <button disabled={!!busy} onClick={identityInfo?.eligible ? submitPrivate : submit} className="btn btn-primary">
+                {busy === "submitPrivate" ? "Submitting privately…" : busy === "submit" ? "Submitting…" : identityInfo?.eligible ? "Submit investigation privately" : "Submit investigation"}
               </button>
               {!connectedAddr && <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Connect your wallet to submit.</div>}
             </div>
@@ -1018,8 +1313,28 @@ export default function BountyDetailPage() {
           )}
           {(isWinnerSelected || isClaimable) && (
             <>
-              {isWinner ? (
-                locksInfo && !locksInfo.hasPayoutLock ? (
+              {isWinner || isWinnerPrivate ? (
+                isWinnerPrivate ? (
+                  locksInfo && !locksInfo.hasPayoutLock ? (
+                    <div style={{ display: "grid", gap: 8, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>Register payout claim privately</div>
+                      <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
+                        Step 1 of 2: register your payout claim as Anonymous {identityInfo ? identityShortId(identityInfo.identity) : ""} (one private transaction).
+                        Only the winning identity can do this — your wallet stays private.
+                      </p>
+                      <button disabled={!!busy} onClick={registerPayoutPrivate} className="btn btn-primary">
+                        {busy === "registerPrivate" ? "Registering…" : "Register payout claim privately"}
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {!storedPayoutSecret && secretField("payout-secret", "Payout secret (backup)", payoutSecretPaste, setPayoutSecretPaste, "Not found on this device — register your payout claim again to rotate it, or paste the backup.")}
+                      <button disabled={!!busy} onClick={claim} className="btn btn-primary">
+                        {busy === "claim" ? "Claiming privately…" : "Claim reward privately"}
+                      </button>
+                    </div>
+                  )
+                ) : locksInfo && !locksInfo.hasPayoutLock ? (
                   <div style={{ display: "grid", gap: 8, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
                     <div style={{ fontSize: 13, fontWeight: 600 }}>Register payout claim</div>
                     <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
@@ -1054,7 +1369,7 @@ export default function BountyDetailPage() {
           {isPaid && <div className="alert alert-success">✓ Reward released — winner received funds privately.</div>}
           {isRefunded && <div className="alert alert-warn">This bounty was refunded to the creator.</div>}
         </div>
-        {busy && <div style={{ marginTop: 12, fontSize: 12, color: "var(--amber)" }}>Waiting for wallet… {busy === "fund" || busy === "claim" || busy === "refund" ? "This uses a private proof and may take up to 30 seconds." : "Confirm in your wallet."}</div>}
+        {busy && <div style={{ marginTop: 12, fontSize: 12, color: "var(--amber)" }}>Waiting for wallet… {busy === "fund" || busy === "claim" || busy === "refund" || busy === "stakePrivate" || busy === "submitPrivate" || busy === "registerPrivate" || busy === "unstakePrivate" ? "This uses a private proof and may take up to 30 seconds." : "Confirm in your wallet."}</div>}
         {txHash && (
           <div style={{ marginTop: 12, fontSize: 12 }}>
             Transaction:{" "}
@@ -1092,7 +1407,20 @@ export default function BountyDetailPage() {
               const invAddr = String(s.investigator);
               const invHex = toHexAddress(invAddr) ?? invAddr;
               const statusLabel = getSubmissionStatusName(s.status ?? s[5] ?? "Pending");
-              const isOwn = connectedAddr && normalizeAddr(invAddr) === normalizeAddr(connectedAddr);
+              // Ownership: private submissions match by identity commitment on
+              // this device; legacy submissions match by wallet address.
+              const subIdentityNorm = (() => {
+                const raw = (s as any)?.identity ?? (s as any)?.[6];
+                const n = normFelt(raw != null ? String(raw) : null);
+                if (!n) return null;
+                try {
+                  return BigInt(n) === 0n ? null : n;
+                } catch {
+                  return null;
+                }
+              })();
+              const isOwnPrivate = !!(subIdentityNorm && storedIdentity && normFelt(storedIdentity.identity)?.toLowerCase() === subIdentityNorm.toLowerCase());
+              const isOwn = isOwnPrivate || (connectedAddr && normalizeAddr(invAddr) === normalizeAddr(connectedAddr));
               return (
                 <div key={s.id} style={{ padding: 14, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 8 }}>
@@ -1128,8 +1456,8 @@ export default function BountyDetailPage() {
                       </>
                     )}
                     {statusLabel === "Reported" && isOwn && (
-                      <button disabled={!!busy} onClick={() => challenge(Number(s.id))} className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: 12, borderColor: "var(--amber-border)", color: "var(--amber)" }}>
-                        {busy === "challenge" ? "Challenging…" : "Challenge report (3-day window)"}
+                      <button disabled={!!busy} onClick={() => (isOwnPrivate ? challengePrivate(Number(s.id)) : challenge(Number(s.id)))} className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: 12, borderColor: "var(--amber-border)", color: "var(--amber)" }}>
+                        {busy === "challenge" || busy === "challengePrivate" ? "Challenging…" : "Challenge report (3-day window)"}
                       </button>
                     )}
                     {statusLabel === "Reported" && (isCreator || connectedAddr === "0x100") && (

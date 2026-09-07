@@ -46,6 +46,11 @@ pub struct Bounty {
 }
 
 /// Investigation submission — investigator pseudonymous, requires stake + reputation.
+/// `identity` is the private investigator identity (genesis tip of a Poseidon
+/// hash chain, see `docs/PRIVATE_INVESTIGATOR.md`). `0` = legacy wallet-keyed
+/// submission where `investigator` is the caller's public address. For private
+/// submissions `investigator` holds the identity cast as an address and NO
+/// wallet address is recorded anywhere.
 #[derive(Copy, Drop, Serde, starknet::Store, PartialEq, Debug)]
 pub struct Submission {
     pub id: u64,
@@ -54,6 +59,7 @@ pub struct Submission {
     pub evidence_hash: felt252,
     pub timestamp: u64,
     pub status: SubmissionStatus,
+    pub identity: felt252,
 }
 
 /// Report for malicious/fraudulent investigation — creator-originated, safeguards against abuse.

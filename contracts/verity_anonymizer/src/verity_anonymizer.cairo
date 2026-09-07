@@ -40,6 +40,23 @@ pub const ALLOWED_OP_PROOF: felt252 = 'VERITY_PROOF';
 pub const ALLOWED_OP_FUND: felt252 = 'FUND_BOUNTY';
 pub const ALLOWED_OP_REFUND: felt252 = 'REFUND_BOUNTY';
 pub const ALLOWED_OP_RELEASE: felt252 = 'RELEASE';
+//! Private investigator identity operations (docs/PRIVATE_INVESTIGATOR.md).
+//! Per-op `privacy_invoke(operation, bounty_id, amount, nonce, note_id, secret)`
+//! slot semantics — the 6-argument shape is unchanged so FUND/REFUND/RELEASE
+//! calldata is byte-identical:
+//! - STAKE_IDENTITY:  bounty_id=0, amount=stake, note_id=0, secret=identity.
+//!   Value arrives via the private `withdraw` leg first (Phase 3 FUND pattern).
+//! - SUBMIT_PRIVATE:  bounty_id=bid, amount=0, note_id=evidence_hash,
+//!   secret=chain preimage. Identity resolved helper-side via BM tip index.
+//! - REGISTER_PAYOUT: bounty_id=bid, amount=0, note_id=payout_lock,
+//!   secret=chain preimage. Verified lock lands in `payout_locks`, so the
+//!   existing RELEASE op works unchanged for private winners.
+//! - UNSTAKE_IDENTITY: bounty_id=0, amount=0, note_id=return note,
+//!   secret=chain preimage. Returns an exact-backed OpenNoteDeposit.
+pub const ALLOWED_OP_STAKE: felt252 = 'STAKE_IDENTITY';
+pub const ALLOWED_OP_SUBMIT: felt252 = 'SUBMIT_PRIVATE';
+pub const ALLOWED_OP_REG_PAYOUT: felt252 = 'REGISTER_PAYOUT';
+pub const ALLOWED_OP_UNSTAKE: felt252 = 'UNSTAKE_IDENTITY';
 
 /// Poseidon lock for a secret: must equal `computePoseidonHashOnElements([secret])`
 /// as computed by starknet.js (see parity test). Single-use; cleared on success.
@@ -68,6 +85,12 @@ pub trait IVerityAnonymizer<T> {
     fn has_refund_lock(self: @T, bounty_id: u64) -> bool;
     fn has_payout_lock(self: @T, bounty_id: u64) -> bool;
     fn get_escrow(self: @T, bounty_id: u64) -> u128;
+    /// Live STRK escrow backing a private investigator identity.
+    fn get_stake_escrow(self: @T, identity: felt252) -> u128;
+    /// Slash an identity's escrow to the protocol treasury (owner). DIRECT
+    /// call, BountyManager only — invoked by `resolve_report` after the
+    /// dispute window resolves to slash.
+    fn slash_stake(ref self: T, identity: felt252);
     /// Pool-routed private entrypoint.
     /// `note_id` slot: FUND/REFUND must pass 0 (no notes involved); RELEASE passes
     /// the winner open-note id. `secret`: single-use authorization secret for
@@ -89,19 +112,27 @@ pub trait IBountyManagerForAnonymizer<T> {
     fn claim_payout(ref self: T, bounty_id: u64);
     fn refund_bounty(ref self: T, bounty_id: u64);
     fn get_bounty(self: @T, bounty_id: u64) -> Bounty;
+    // Private-identity callbacks (must match BountyManager exactly; the
+    // callback-shape test in the bounty_manager package pins them).
+    fn register_stake_identity(ref self: T, identity: felt252, amount: u128);
+    fn submit_private(ref self: T, bounty_id: u64, evidence_hash: felt252, preimage: felt252) -> u64;
+    fn register_private_payout_lock(ref self: T, bounty_id: u64, payout_lock: felt252, preimage: felt252);
+    fn consume_preimage_by_tip(ref self: T, preimage: felt252) -> felt252;
+    fn is_identity_slashed(self: @T, identity: felt252) -> bool;
 }
 
 #[starknet::contract]
 pub mod VerityAnonymizer {
     use core::num::traits::Zero;
     use openzeppelin::interfaces::token::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-    use starknet::{ContractAddress, get_caller_address};
+    use starknet::{ContractAddress, get_caller_address, get_contract_address};
     use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess, StoragePointerWriteAccess};
     use privacy::objects::OpenNoteDeposit;
     use privacy::utils::constants::STRK_TOKEN_ADDRESS;
     use bounty_manager::types::BountyStatus;
     use super::{
         ALLOWED_OP_FUND, ALLOWED_OP_PROOF, ALLOWED_OP_REFUND, ALLOWED_OP_RELEASE,
+        ALLOWED_OP_STAKE, ALLOWED_OP_SUBMIT, ALLOWED_OP_REG_PAYOUT, ALLOWED_OP_UNSTAKE,
         IBountyManagerForAnonymizerDispatcher, IBountyManagerForAnonymizerDispatcherTrait,
         check_secret,
     };
@@ -117,6 +148,11 @@ pub mod VerityAnonymizer {
         refund_locks: Map<u64, felt252>,
         payout_locks: Map<u64, felt252>,
         escrowed: Map<u64, u128>,
+        // Private investigator stake escrow: identity commitment → STRK held.
+        // Backed 1:1 by the private withdraw legs that precede STAKE ops;
+        // `total_stake_held` lets STAKE assert real backing on every op.
+        stake_escrow: Map<felt252, u128>,
+        total_stake_held: u128,
     }
 
     #[event]
@@ -130,6 +166,11 @@ pub mod VerityAnonymizer {
         EscrowFunded: EscrowFunded,
         EscrowRefunded: EscrowRefunded,
         EscrowReleased: EscrowReleased,
+        IdentityStaked: IdentityStaked,
+        IdentityUnstaked: IdentityUnstaked,
+        IdentitySlashed: IdentitySlashed,
+        PrivateSubmissionRelayed: PrivateSubmissionRelayed,
+        PrivatePayoutLockRelayed: PrivatePayoutLockRelayed,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -189,6 +230,43 @@ pub mod VerityAnonymizer {
         #[key]
         pub bounty_id: u64,
         pub amount: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct IdentityStaked {
+        #[key]
+        pub identity: felt252,
+        pub amount: u128,
+        pub nonce: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct IdentityUnstaked {
+        #[key]
+        pub identity: felt252,
+        pub amount: u128,
+        pub nonce: felt252,
+        pub note_id: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct IdentitySlashed {
+        #[key]
+        pub identity: felt252,
+        pub amount: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct PrivateSubmissionRelayed {
+        #[key]
+        pub bounty_id: u64,
+        pub submission_id: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct PrivatePayoutLockRelayed {
+        #[key]
+        pub bounty_id: u64,
     }
 
     #[constructor]
@@ -287,6 +365,25 @@ pub mod VerityAnonymizer {
 
         fn get_escrow(self: @ContractState, bounty_id: u64) -> u128 {
             self.escrowed.read(bounty_id)
+        }
+
+        fn get_stake_escrow(self: @ContractState, identity: felt252) -> u128 {
+            self.stake_escrow.read(identity)
+        }
+
+        fn slash_stake(ref self: ContractState, identity: felt252) {
+            let bm_addr = self.bounty_manager.read();
+            assert(bm_addr.is_non_zero(), 'BM_NOT_SET');
+            assert(get_caller_address() == bm_addr, 'NOT_BOUNTY_MANAGER');
+            let escrow = self.stake_escrow.read(identity);
+            self.stake_escrow.write(identity, 0);
+            if escrow.is_non_zero() {
+                self.total_stake_held.write(self.total_stake_held.read() - escrow);
+                // Slashed funds go to the protocol treasury (owner). Fixed rule.
+                let token = IERC20Dispatcher { contract_address: self.strk_token.read() };
+                assert(token.transfer(self.owner.read(), escrow.into()), 'TRANSFER_FAILED');
+            }
+            self.emit(IdentitySlashed { identity, amount: escrow });
         }
 
         fn privacy_invoke(
@@ -394,6 +491,91 @@ pub mod VerityAnonymizer {
                 self.emit(EscrowReleased { bounty_id, amount });
                 let mut out: Array<OpenNoteDeposit> = array![];
                 out.append(OpenNoteDeposit { note_id, token: token_addr, amount });
+                return out.span();
+            } else if operation == ALLOWED_OP_STAKE {
+                // Private investigator stake. Value arrives via the private
+                // `withdraw` leg BEFORE this invoke (same pattern as FUND);
+                // the helper escrows it under the identity commitment. The
+                // record contains NO wallet address: origin is hidden by the
+                // pool, the fixed amount is public, timing is observable.
+                assert(bounty_id == 0, 'BOUNTY_MUST_BE_ZERO');
+                assert(amount.is_non_zero(), 'AMOUNT_ZERO');
+                assert(note_id.is_zero(), 'NOTE_MUST_BE_ZERO');
+                // `secret` slot carries the identity (genesis tip). No prior
+                // lock: first claim wins. Front-running a commitment locks only
+                // the attacker's own funds (unusable without the seed).
+                assert(secret.is_non_zero(), 'IDENTITY_ZERO');
+                let identity = secret;
+                assert(self.stake_escrow.read(identity) == 0, 'STAKE_ACTIVE');
+                // Solvency: the withdraw leg must have actually delivered.
+                let token_addr = self.strk_token.read();
+                let token = IERC20Dispatcher { contract_address: token_addr };
+                let balance: u256 = token.balance_of(get_contract_address());
+                let held: u256 = self.total_stake_held.read().into();
+                assert(balance >= held + amount.into(), 'STAKE_NOT_BACKED');
+                let bm_addr = self.bounty_manager.read();
+                assert(bm_addr.is_non_zero(), 'BM_NOT_SET');
+                let bm = IBountyManagerForAnonymizerDispatcher { contract_address: bm_addr };
+                bm.register_stake_identity(identity, amount);
+                self.stake_escrow.write(identity, amount);
+                self.total_stake_held.write(self.total_stake_held.read() + amount);
+                self.emit(IdentityStaked { identity, amount, nonce });
+                let out: Array<OpenNoteDeposit> = array![];
+                return out.span();
+            } else if operation == ALLOWED_OP_SUBMIT {
+                // Pool-routed private submission. `note_id` slot carries the
+                // evidence hash, `secret` slot the chain preimage; the BM tip
+                // index resolves the identity (never in calldata).
+                assert(amount == 0, 'AMOUNT_MUST_BE_ZERO');
+                assert(note_id.is_non_zero(), 'EVIDENCE_ZERO');
+                assert(secret.is_non_zero(), 'PREIMAGE_ZERO');
+                let bm_addr = self.bounty_manager.read();
+                assert(bm_addr.is_non_zero(), 'BM_NOT_SET');
+                let bm = IBountyManagerForAnonymizerDispatcher { contract_address: bm_addr };
+                let submission_id = bm.submit_private(bounty_id, note_id, secret);
+                self.emit(PrivateSubmissionRelayed { bounty_id, submission_id });
+                let out: Array<OpenNoteDeposit> = array![];
+                return out.span();
+            } else if operation == ALLOWED_OP_REG_PAYOUT {
+                // Pool-routed payout-lock registration for a private winner.
+                // `note_id` slot carries the payout lock, `secret` the chain
+                // preimage. The verified lock lands in `payout_locks`, so the
+                // existing RELEASE op works unchanged.
+                assert(amount == 0, 'AMOUNT_MUST_BE_ZERO');
+                assert(note_id.is_non_zero(), 'LOCK_ZERO');
+                assert(secret.is_non_zero(), 'PREIMAGE_ZERO');
+                let bm_addr = self.bounty_manager.read();
+                assert(bm_addr.is_non_zero(), 'BM_NOT_SET');
+                let bm = IBountyManagerForAnonymizerDispatcher { contract_address: bm_addr };
+                bm.register_private_payout_lock(bounty_id, note_id, secret);
+                self.payout_locks.write(bounty_id, note_id);
+                self.emit(PrivatePayoutLockRelayed { bounty_id });
+                let out: Array<OpenNoteDeposit> = array![];
+                return out.span();
+            } else if operation == ALLOWED_OP_UNSTAKE {
+                // Private unstake: returns the full escrow as an exact-backed
+                // open note (same backing pattern as RELEASE). Auth is the
+                // chain preimage, verified+consumed by BM; slashed identities
+                // cannot withdraw.
+                assert(bounty_id == 0, 'BOUNTY_MUST_BE_ZERO');
+                assert(amount == 0, 'AMOUNT_MUST_BE_ZERO');
+                assert(note_id.is_non_zero(), 'NOTE_ZERO');
+                assert(secret.is_non_zero(), 'PREIMAGE_ZERO');
+                let bm_addr = self.bounty_manager.read();
+                assert(bm_addr.is_non_zero(), 'BM_NOT_SET');
+                let bm = IBountyManagerForAnonymizerDispatcher { contract_address: bm_addr };
+                let identity = bm.consume_preimage_by_tip(secret);
+                assert(!bm.is_identity_slashed(identity), 'IS_SLASHED_CANNOT_WITHDRAW');
+                let escrow = self.stake_escrow.read(identity);
+                assert(escrow.is_non_zero(), 'NO_STAKE');
+                let token_addr = self.strk_token.read();
+                let token = IERC20Dispatcher { contract_address: token_addr };
+                assert(token.approve(pool, escrow.into()), 'APPROVE_FAILED');
+                self.stake_escrow.write(identity, 0);
+                self.total_stake_held.write(self.total_stake_held.read() - escrow);
+                self.emit(IdentityUnstaked { identity, amount: escrow, nonce, note_id });
+                let mut out: Array<OpenNoteDeposit> = array![];
+                out.append(OpenNoteDeposit { note_id, token: token_addr, amount: escrow });
                 return out.span();
             } else {
                 assert(false, 'INVALID_OP');

@@ -22,16 +22,38 @@ document is the working summary; when in doubt, the spec wins.
 The fundamental loop:
 
 ```text
-REQUESTER → STRK20 (private funding) → VERITY BOUNTY → INVESTIGATORS → EVIDENCE
-  → VERIFIERS (13) → 7/13 WINNER → CLAIMABLE → STRK20 (private payout)
+REQUESTER → STRK20 (private funding) → VERITY BOUNTY → INVESTIGATORS
+  → (private stake + private reputation → eligible) → EVIDENCE
+  → CREATOR review → WINNER → CLAIMABLE → STRK20 (private payout)
 ```
+
+There are no verifiers and no voting: the creator reviews and selects the
+winner. (Earlier revisions of this file described a 13-verifier / 7-of-13
+model; that was removed — see docs/AI_HANDOFF.md §§28–29.)
 
 ## 2. Contracts
 
 | Contract | Role | STRK20 responsibility |
 | --- | --- | --- |
-| `BountyManager` | All bounty *business logic* (create, credits, submissions, voting, winner, claimable state). | None — no ZK, notes, viewing keys, private balances, proof generation (SPEC §6.1). |
-| `VerityAnonymizer` | The STRK20/application boundary; deliberately small (SPEC §10). | Pool-only authorization, replay protection, `FundBounty`, `ReleaseToOpenNote`, approve pool, return real `privacy::objects::OpenNoteDeposit`. |
+| `BountyManager` | All bounty *business logic* (create, credits, submissions, winner, claimable state, staking + reputation eligibility). | None — no ZK, notes, viewing keys, private balances, proof generation (SPEC §6.1). |
+| `VerityAnonymizer` | The STRK20/application boundary; deliberately small (SPEC §10). | Pool-only authorization, replay protection, `FundBounty`, `ReleaseToOpenNote`, investigator-identity ops (`STAKE_IDENTITY`, `SUBMIT_PRIVATE`, `REGISTER_PAYOUT`, `UNSTAKE_IDENTITY`), per-identity STRK escrow, approve pool, return real `privacy::objects::OpenNoteDeposit`. |
+
+## 2.1 Private investigator identity (docs/PRIVATE_INVESTIGATOR.md)
+
+```text
+PUBLIC WALLET → STRK20 private flow → IDENTITY COMMITMENT (felt252)
+  → private stake (real STRK escrow, helper-held, identity-keyed)
+  → private reputation (60 / +10 / −20, identity-keyed)
+  → eligibility proof → private submit / challenge / payout-register / unstake
+```
+
+- Identity = genesis tip of a Poseidon hash chain (seed device-only);
+  per-action preimages are single-use auth. No wallet→identity record exists.
+- BM owns identity auth/reputation/eligibility; the helper owns STRK escrow.
+  They call each other over the established pool-routed callback pattern.
+- `IReputationProvider` remains the external-reputation seam (commitment-keyed
+  when a provider is set). Legacy wallet-keyed staking/submission paths are
+  frozen for compatibility.
 
 ## 3. Private funding flow (Phase 3 target)
 

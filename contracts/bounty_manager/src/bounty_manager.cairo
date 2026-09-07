@@ -2,6 +2,7 @@
 //! Creator-controlled winner selection, fixed stake, report/slash, reputation threshold,
 //! protocol fee on refund. Preserves STRK20 private funding/payout via VerityAnonymizer.
 
+use core::traits::TryInto;
 use starknet::ContractAddress;
 use crate::types::{Bounty, BountyStatus, Submission, SubmissionStatus, Report};
 
@@ -47,6 +48,31 @@ pub trait IBountyManager<T> {
     fn resolve_report(ref self: T, bounty_id: u64, submission_id: u64, should_slash: bool);
     fn get_report(self: @T, bounty_id: u64, submission_id: u64) -> Report;
     fn withdraw_stake(ref self: T);
+    // Private investigator identities (commitment-keyed, STRK20-routed).
+    // Identity = genesis tip of a Poseidon hash chain whose seed never leaves
+    // the investigator's device (see docs/PRIVATE_INVESTIGATOR.md). No wallet
+    // address is recorded for private identities. Registration, private
+    // submission and payout-lock registration are pool-routed via the
+    // VerityAnonymizer (caller == anonymizer); challenge consumes a chain
+    // preimage from ANY direct caller (preimage is the auth, sender is
+    // irrelevant). Legacy wallet-keyed entries above are frozen for compat.
+    fn register_stake_identity(ref self: T, identity: felt252, amount: u128);
+    // NOTE: pool-routed private entries resolve the identity from the chain
+    // preimage (`tip = Poseidon(preimage)` → `tip_owner[tip]`), so the
+    // identity itself never travels in invoke calldata. This keeps the
+    // 6-argument `privacy_invoke` shape byte-identical for FUND/REFUND/RELEASE
+    // (per-op slot table in docs/PRIVATE_INVESTIGATOR.md).
+    fn submit_private(ref self: T, bounty_id: u64, evidence_hash: felt252, preimage: felt252) -> u64;
+    fn challenge_private_report(ref self: T, bounty_id: u64, submission_id: u64, preimage: felt252);
+    fn register_private_payout_lock(ref self: T, bounty_id: u64, payout_lock: felt252, preimage: felt252);
+    fn consume_preimage_by_tip(ref self: T, preimage: felt252) -> felt252;
+    fn get_identity_tip(self: @T, identity: felt252) -> felt252;
+    fn get_identity_reputation(self: @T, identity: felt252) -> u64;
+    fn is_identity_registered(self: @T, identity: felt252) -> bool;
+    fn is_identity_slashed(self: @T, identity: felt252) -> bool;
+    fn is_identity_eligible(self: @T, identity: felt252) -> bool;
+    fn get_identity_stake(self: @T, identity: felt252) -> u128;
+    fn get_private_payout_lock(self: @T, bounty_id: u64) -> felt252;
     // Deprecated verifier stubs — kept to surface clear error if old frontend calls them
     fn set_verifiers(ref self: T, verifiers: Span<ContractAddress>);
     fn is_verifier(self: @T, account: ContractAddress) -> bool;
@@ -61,12 +87,36 @@ pub trait IReputationProvider<T> {
     fn meets_threshold(self: @T, account: ContractAddress, threshold: u64) -> bool;
 }
 
+/// Minimal view of the VerityAnonymizer escrow/slash surface, as seen from
+/// BountyManager. Declared locally (no package dependency) to avoid a
+/// bounty_manager → verity_anonymizer dependency cycle: the anonymizer package
+/// already depends on bounty_manager types. Must stay in sync with
+/// `IVerityAnonymizer::{get_stake_escrow, slash_stake}`.
+#[starknet::interface]
+pub trait IStakeHelper<T> {
+    fn get_stake_escrow(self: @T, identity: felt252) -> u128;
+    fn slash_stake(ref self: T, identity: felt252);
+}
+
+/// Length of the investigator hash chain committed at private-stake time.
+/// Each submit / challenge / payout-register / unstake consumes one preimage.
+pub const IDENTITY_CHAIN_LEN: u64 = 64;
+
+/// Cast a private identity commitment to an address for storage in
+/// address-typed fields (Submission.investigator, Bounty.winner) and for the
+/// address-keyed `IReputationProvider` boundary. The value is a pseudonym:
+/// it carries no wallet information.
+pub fn identity_to_address(identity: felt252) -> ContractAddress {
+    let addr: ContractAddress = identity.try_into().unwrap();
+    addr
+}
+
 #[starknet::contract]
 pub mod BountyManager {
     use core::num::traits::Zero;
     use starknet::{ContractAddress, get_caller_address, get_block_timestamp};
     use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess, StoragePointerWriteAccess};
-    use super::{IBountyManager, IReputationProviderDispatcher, IReputationProviderDispatcherTrait};
+    use super::{IBountyManager, IReputationProviderDispatcher, IReputationProviderDispatcherTrait, IStakeHelperDispatcher, IStakeHelperDispatcherTrait, IDENTITY_CHAIN_LEN, identity_to_address};
     use crate::types::{Bounty, BountyStatus, Submission, SubmissionStatus, Report};
 
     const CHALLENGE_PERIOD: u64 = 259200; // 3 days
@@ -96,6 +146,18 @@ pub mod BountyManager {
         has_reported: Map<(u64, u64), bool>,
         // Protocol fee (bps, 500 = 5%)
         protocol_fee_bps: u64,
+        // Private investigator identities (commitment-keyed; no wallet data).
+        // Identity = genesis tip of the investigator's Poseidon hash chain.
+        id_tip: Map<felt252, felt252>,
+        id_chain_len: Map<felt252, u64>,
+        id_registered: Map<felt252, bool>,
+        id_reputation: Map<felt252, u64>,
+        id_slashed: Map<felt252, bool>,
+        // Reverse index: every live (and past) chain tip → owning identity.
+        // Lets pool-routed entries resolve the identity from a preimage alone.
+        tip_owner: Map<felt252, felt252>,
+        // Payout locks committed by private winners (consumed by RELEASE).
+        private_payout_locks: Map<u64, felt252>,
     }
 
     #[event]
@@ -121,6 +183,9 @@ pub mod BountyManager {
         StakeAmountUpdated: StakeAmountUpdated,
         ReputationThresholdUpdated: ReputationThresholdUpdated,
         ReputationProviderUpdated: ReputationProviderUpdated,
+        IdentityRegistered: IdentityRegistered,
+        PrivateInvestigationSubmitted: PrivateInvestigationSubmitted,
+        PrivatePayoutLockRegistered: PrivatePayoutLockRegistered,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -163,6 +228,12 @@ pub mod BountyManager {
     pub struct ReputationThresholdUpdated { pub old: u64, pub new: u64 }
     #[derive(Drop, starknet::Event)]
     pub struct ReputationProviderUpdated { pub old: ContractAddress, pub new: ContractAddress }
+    #[derive(Drop, starknet::Event)]
+    pub struct IdentityRegistered { #[key] pub identity: felt252, pub amount: u128, pub chain_len: u64 }
+    #[derive(Drop, starknet::Event)]
+    pub struct PrivateInvestigationSubmitted { #[key] pub bounty_id: u64, #[key] pub submission_id: u64, pub identity: felt252, pub evidence_hash: felt252 }
+    #[derive(Drop, starknet::Event)]
+    pub struct PrivatePayoutLockRegistered { #[key] pub bounty_id: u64, pub identity: felt252 }
 
     #[constructor]
     fn constructor(ref self: ContractState, owner: ContractAddress) {
@@ -272,7 +343,7 @@ pub mod BountyManager {
             assert(rep >= min_rep, 'REPUTATION_TOO_LOW');
             let count = self.submission_counts.read(bounty_id);
             let submission_id = count + 1;
-            let submission = Submission { id: submission_id, bounty_id, investigator, evidence_hash, timestamp: get_block_timestamp(), status: SubmissionStatus::Pending };
+            let submission = Submission { id: submission_id, bounty_id, investigator, evidence_hash, timestamp: get_block_timestamp(), status: SubmissionStatus::Pending, identity: 0 };
             self.submissions.write((bounty_id, submission_id), submission);
             self.submission_counts.write(bounty_id, submission_id);
             self.emit(InvestigationSubmitted { bounty_id, submission_id, investigator, evidence_hash });
@@ -314,12 +385,20 @@ pub mod BountyManager {
             submission.status = SubmissionStatus::Accepted;
             self.submissions.write((bounty_id, submission_id), submission);
             self.emit(WinnerSelected { bounty_id, winner: submission.investigator, submission_id });
-            // Reputation boost for winner +10 capped at 100
+            // Reputation boost for winner +10 capped at 100 — credited to the
+            // private identity when the winning submission is private.
             let winner = submission.investigator;
-            let old_rep = self._get_reputation(winner);
-            let new_rep = if old_rep + 10 > 100 { 100 } else { old_rep + 10 };
-            self.reputation.write(winner, new_rep);
-            self.emit(ReputationUpdated { account: winner, old_score: old_rep, new_score: new_rep, reason: 'WIN_SELECTED' });
+            if submission.identity.is_non_zero() {
+                let old_rep = self._get_identity_reputation(submission.identity);
+                let new_rep = if old_rep + 10 > 100 { 100 } else { old_rep + 10 };
+                self.id_reputation.write(submission.identity, new_rep);
+                self.emit(ReputationUpdated { account: winner, old_score: old_rep, new_score: new_rep, reason: 'WIN_SELECTED' });
+            } else {
+                let old_rep = self._get_reputation(winner);
+                let new_rep = if old_rep + 10 > 100 { 100 } else { old_rep + 10 };
+                self.reputation.write(winner, new_rep);
+                self.emit(ReputationUpdated { account: winner, old_score: old_rep, new_score: new_rep, reason: 'WIN_SELECTED' });
+            }
             // Transition to Claimable immediately
             let mut b2 = self.bounties.read(bounty_id);
             b2.status = BountyStatus::Claimable;
@@ -520,13 +599,32 @@ pub mod BountyManager {
             self.emit(ReportResolved { bounty_id, submission_id, slashed: should_slash, resolver: caller });
             if should_slash {
                 assert(!self.is_slashed_map.read(investigator), 'ALREADY_SLASHED');
-                let old_rep = self._get_reputation(investigator);
-                let new_rep = if old_rep >= 20 { old_rep - 20 } else { 0 };
-                self.reputation.write(investigator, new_rep);
-                self.is_slashed_map.write(investigator, true);
-                self.emit(ReputationUpdated { account: investigator, old_score: old_rep, new_score: new_rep, reason: 'SLASHED' });
-                let stake_amt = self.stake_balances.read(investigator);
-                self.emit(Slashed { bounty_id, submission_id, investigator, slashed_amount: stake_amt });
+                if submission.identity.is_non_zero() {
+                    // Private identity slash: reputation −20 (floor 0), slashed
+                    // flag on the identity, and the STRK escrow in the helper
+                    // is slashed to the protocol treasury (owner).
+                    let identity = submission.identity;
+                    assert(!self.id_slashed.read(identity), 'ALREADY_SLASHED');
+                    let old_rep = self._get_identity_reputation(identity);
+                    let new_rep = if old_rep >= 20 { old_rep - 20 } else { 0 };
+                    self.id_reputation.write(identity, new_rep);
+                    self.id_slashed.write(identity, true);
+                    let pseudo = identity_to_address(identity);
+                    self.emit(ReputationUpdated { account: pseudo, old_score: old_rep, new_score: new_rep, reason: 'SLASHED' });
+                    let stake_amt = self._identity_escrow(identity);
+                    self.emit(Slashed { bounty_id, submission_id, investigator: pseudo, slashed_amount: stake_amt });
+                    let helper = self.anonymizer.read();
+                    assert(helper.is_non_zero(), 'ANONYMIZER_NOT_SET');
+                    IStakeHelperDispatcher { contract_address: helper }.slash_stake(identity);
+                } else {
+                    let old_rep = self._get_reputation(investigator);
+                    let new_rep = if old_rep >= 20 { old_rep - 20 } else { 0 };
+                    self.reputation.write(investigator, new_rep);
+                    self.is_slashed_map.write(investigator, true);
+                    self.emit(ReputationUpdated { account: investigator, old_score: old_rep, new_score: new_rep, reason: 'SLASHED' });
+                    let stake_amt = self.stake_balances.read(investigator);
+                    self.emit(Slashed { bounty_id, submission_id, investigator, slashed_amount: stake_amt });
+                }
                 let mut sub = self.submissions.read((bounty_id, submission_id));
                 sub.status = SubmissionStatus::Slashed;
                 self.submissions.write((bounty_id, submission_id), sub);
@@ -555,6 +653,150 @@ pub mod BountyManager {
             self.has_staked.write(caller, false);
             self.stake_balances.write(caller, 0);
             self.emit(StakeWithdrawn { investigator: caller, amount });
+        }
+
+        // Private investigator identities (STRK20-routed; see docs/PRIVATE_INVESTIGATOR.md).
+        // Registration is pool-routed: the helper escrows real STRK first,
+        // then calls here with caller == anonymizer. No wallet address is
+        // recorded. Re-registration of a live identity is idempotent (rep
+        // history preserved); slashed identities can never re-register.
+        fn register_stake_identity(ref self: ContractState, identity: felt252, amount: u128) {
+            let helper = self.anonymizer.read();
+            assert(helper.is_non_zero(), 'ANONYMIZER_NOT_SET');
+            assert(get_caller_address() == helper, 'NOT_ANONYMIZER');
+            assert(identity.is_non_zero(), 'IDENTITY_ZERO');
+            assert(amount == self.stake_amount.read(), 'AMOUNT_MISMATCH');
+            assert(!self.id_slashed.read(identity), 'IS_SLASHED_CANNOT_STAKE');
+            if !self.id_registered.read(identity) {
+                self.id_registered.write(identity, true);
+                self.id_tip.write(identity, identity);
+                self.tip_owner.write(identity, identity);
+                self.id_chain_len.write(identity, IDENTITY_CHAIN_LEN);
+                self.id_reputation.write(identity, 60);
+                self.emit(ReputationUpdated { account: identity_to_address(identity), old_score: 0, new_score: 60, reason: 'INITIAL_STAKE' });
+                self.emit(IdentityRegistered { identity, amount, chain_len: IDENTITY_CHAIN_LEN });
+            }
+        }
+
+        // Pool-routed private submission (caller == anonymizer). Auth is the
+        // hash-chain preimage: the identity is resolved as
+        // `tip_owner[Poseidon(preimage)]` and the tip advances atomically, so a
+        // revealed preimage can never authorize again. The direct caller is NOT
+        // recorded, so any relayer/wallet may relay without linking a wallet
+        // to the identity.
+        // KNOWN LIMITATION (documented): creator self-submission via a private
+        // identity cannot be excluded on-chain without breaking investigator
+        // privacy; it is economically irrational (stake + pool fees exceed any
+        // gain from winning one's own reward).
+        fn submit_private(ref self: ContractState, bounty_id: u64, evidence_hash: felt252, preimage: felt252) -> u64 {
+            let helper = self.anonymizer.read();
+            assert(helper.is_non_zero(), 'ANONYMIZER_NOT_SET');
+            assert(get_caller_address() == helper, 'NOT_ANONYMIZER');
+            let bounty = self.bounties.read(bounty_id);
+            assert(bounty.creator.is_non_zero(), 'BOUNTY_NOT_FOUND');
+            assert(bounty.status == BountyStatus::Open, 'NOT_OPEN');
+            assert(evidence_hash.is_non_zero(), 'EVIDENCE_ZERO');
+            let identity = self._consume_by_tip_inner(preimage);
+            assert(!self.id_slashed.read(identity), 'IS_SLASHED');
+            let rep = self._get_identity_reputation(identity);
+            assert(rep >= self.minimum_reputation.read(), 'REPUTATION_TOO_LOW');
+            let escrow = self._identity_escrow(identity);
+            assert(escrow >= self.stake_amount.read(), 'NOT_STAKED');
+            let count = self.submission_counts.read(bounty_id);
+            let submission_id = count + 1;
+            let pseudo = identity_to_address(identity);
+            let submission = Submission { id: submission_id, bounty_id, investigator: pseudo, evidence_hash, timestamp: get_block_timestamp(), status: SubmissionStatus::Pending, identity };
+            self.submissions.write((bounty_id, submission_id), submission);
+            self.submission_counts.write(bounty_id, submission_id);
+            self.emit(PrivateInvestigationSubmitted { bounty_id, submission_id, identity, evidence_hash });
+            submission_id
+        }
+
+        // Direct-call challenge for private submissions, callable by ANY
+        // account: knowledge of the next chain preimage IS the authorization
+        // (proves ownership of the identity without revealing a wallet or the
+        // seed). Kept direct (not pool-routed) so disputes can beat the
+        // challenge deadline without proof latency/fees; no new linkage is
+        // created beyond what the pool-routed submission already published.
+        fn challenge_private_report(ref self: ContractState, bounty_id: u64, submission_id: u64, preimage: felt252) {
+            let mut report = self.reports.read((bounty_id, submission_id));
+            assert(report.reporter.is_non_zero(), 'REPORT_NOT_FOUND');
+            assert(!report.resolved, 'ALREADY_RESOLVED');
+            assert(!report.challenged, 'ALREADY_CHALLENGED');
+            let now = get_block_timestamp();
+            assert(now <= report.challenge_deadline, 'CHALLENGE_EXPIRED');
+            let submission = self.submissions.read((bounty_id, submission_id));
+            assert(submission.investigator.is_non_zero(), 'SUBMISSION_NOT_FOUND');
+            assert(submission.identity.is_non_zero(), 'NOT_PRIVATE_SUBMISSION');
+            self._consume_preimage_inner(submission.identity, preimage);
+            report.challenged = true;
+            self.reports.write((bounty_id, submission_id), report);
+            self.emit(Challenged { bounty_id, submission_id, investigator: submission.investigator });
+        }
+
+        // Pool-routed payout-lock registration for private winners
+        // (caller == anonymizer). The helper stores the verified lock in its
+        // own payout_locks map, so the existing RELEASE op works unchanged.
+        fn register_private_payout_lock(
+            ref self: ContractState, bounty_id: u64, payout_lock: felt252, preimage: felt252,
+        ) {
+            let helper = self.anonymizer.read();
+            assert(helper.is_non_zero(), 'ANONYMIZER_NOT_SET');
+            assert(get_caller_address() == helper, 'NOT_ANONYMIZER');
+            let bounty = self.bounties.read(bounty_id);
+            assert(bounty.creator.is_non_zero(), 'BOUNTY_NOT_FOUND');
+            assert(bounty.status == BountyStatus::Claimable, 'NOT_CLAIMABLE');
+            assert(payout_lock.is_non_zero(), 'LOCK_ZERO');
+            let identity = self._consume_by_tip_inner(preimage);
+            assert(bounty.winner == identity_to_address(identity), 'NOT_WINNER');
+            self.private_payout_locks.write(bounty_id, payout_lock);
+            self.emit(PrivatePayoutLockRegistered { bounty_id, identity });
+        }
+
+        // Pool-routed preimage consumption used by helper-side flows that
+        // need identity auth without a BM state transition (UNSTAKE).
+        // Returns the resolved identity.
+        fn consume_preimage_by_tip(ref self: ContractState, preimage: felt252) -> felt252 {
+            let helper = self.anonymizer.read();
+            assert(helper.is_non_zero(), 'ANONYMIZER_NOT_SET');
+            assert(get_caller_address() == helper, 'NOT_ANONYMIZER');
+            self._consume_by_tip_inner(preimage)
+        }
+
+        fn get_identity_tip(self: @ContractState, identity: felt252) -> felt252 {
+            self.id_tip.read(identity)
+        }
+
+        fn get_identity_reputation(self: @ContractState, identity: felt252) -> u64 {
+            self._get_identity_reputation(identity)
+        }
+
+        fn is_identity_registered(self: @ContractState, identity: felt252) -> bool {
+            self.id_registered.read(identity)
+        }
+
+        fn is_identity_slashed(self: @ContractState, identity: felt252) -> bool {
+            self.id_slashed.read(identity)
+        }
+
+        fn get_identity_stake(self: @ContractState, identity: felt252) -> u128 {
+            self._identity_escrow(identity)
+        }
+
+        fn get_private_payout_lock(self: @ContractState, bounty_id: u64) -> felt252 {
+            self.private_payout_locks.read(bounty_id)
+        }
+
+        // Eligible = registered stake + unslashed + rep threshold + live
+        // escrow. Total view (never reverts on unset anonymizer) driving the
+        // "Eligible ✓" UI state.
+        fn is_identity_eligible(self: @ContractState, identity: felt252) -> bool {
+            if identity.is_zero() { return false; }
+            if !self.id_registered.read(identity) { return false; }
+            if self.id_slashed.read(identity) { return false; }
+            if self._get_identity_reputation(identity) < self.minimum_reputation.read() { return false; }
+            if self._identity_escrow(identity) < self.stake_amount.read() { return false; }
+            true
         }
 
         // Deprecated verifier stubs
@@ -594,6 +836,59 @@ pub mod BountyManager {
             } else {
                 self.reputation.read(account)
             }
+        }
+
+        // Commitment-keyed reputation. Delegates to the external provider
+        // (identity cast as address — the documented Ethos plug-in path:
+        // a future provider attests commitments, not wallets) when one is
+        // set, else the native identity map.
+        fn _get_identity_reputation(self: @ContractState, identity: felt252) -> u64 {
+            let provider = self.reputation_provider.read();
+            if provider.is_non_zero() {
+                let dispatcher = IReputationProviderDispatcher { contract_address: provider };
+                dispatcher.get_score(identity_to_address(identity))
+            } else {
+                self.id_reputation.read(identity)
+            }
+        }
+
+        // Live STRK escrow for an identity, held by the helper. Zero when the
+        // helper is unset (keeps eligibility views total).
+        fn _identity_escrow(self: @ContractState, identity: felt252) -> u128 {
+            let helper = self.anonymizer.read();
+            if helper.is_zero() {
+                0
+            } else {
+                IStakeHelperDispatcher { contract_address: helper }.get_stake_escrow(identity)
+            }
+        }
+
+        // Verify Poseidon(preimage) == stored tip and advance the tip.
+        // Single-use: a revealed preimage can never authorize again.
+        fn _consume_preimage_inner(ref self: ContractState, identity: felt252, preimage: felt252) {
+            assert(preimage.is_non_zero(), 'PREIMAGE_ZERO');
+            assert(self.id_registered.read(identity), 'NOT_REGISTERED_IDENTITY');
+            let tip = self.id_tip.read(identity);
+            let digest = core::poseidon::poseidon_hash_span(array![preimage].span());
+            assert(digest == tip, 'BAD_PREIMAGE');
+            self.id_tip.write(identity, preimage);
+            self.tip_owner.write(preimage, identity);
+        }
+
+        // Resolve the owning identity from a preimage alone, then consume it.
+        // Used by pool-routed entries whose calldata carries no identity.
+        fn _consume_by_tip_inner(ref self: ContractState, preimage: felt252) -> felt252 {
+            assert(preimage.is_non_zero(), 'PREIMAGE_ZERO');
+            let tip = core::poseidon::poseidon_hash_span(array![preimage].span());
+            let identity = self.tip_owner.read(tip);
+            assert(identity.is_non_zero(), 'UNKNOWN_PREIMAGE');
+            assert(self.id_registered.read(identity), 'NOT_REGISTERED_IDENTITY');
+            // The tip must be LIVE: a stale preimage resolves to an identity
+            // whose current tip has moved on, and is rejected here.
+            assert(self.id_tip.read(identity) == tip, 'BAD_PREIMAGE');
+            self.id_tip.write(identity, preimage);
+            self.tip_owner.write(preimage, identity);
+            identity
         }
     }
 }

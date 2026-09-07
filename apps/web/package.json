@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test:bounty": "node --test lib/bounty.regression.test.ts"
+    "test:bounty": "node --test lib/bounty.regression.test.ts",
+    "test:identity": "node --test lib/identity.regression.test.ts",
+    "test": "node --test lib/bounty.regression.test.ts lib/identity.regression.test.ts"
   },
   "dependencies": {
     "@starknet-io/get-starknet-discovery": "6.0.2",

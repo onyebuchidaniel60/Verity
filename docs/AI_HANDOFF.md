@@ -1447,6 +1447,205 @@ diff (test placeholders only).
 Sepolia funding run (create→locks→FUND→FUNDED→reload→OPEN, second-wallet
 rejection). Gate checkboxes for those remain PENDING; see §19 template.
 
+## 36. PRIVATE INVESTIGATOR STAKING + REPUTATION — START checkpoint (2026-09-07, Muse Spark)
+
+**Directive:** implement private investigator staking + private reputation via
+STRK20 without breaking working funding/payout/creation/submission. Short
+implementation assessment FIRST (this section), then smallest changes.
+
+### 36.1 STRK20 actual-capability findings (verified, not assumed)
+
+1. **Installed Wallet API 0.10.3** (`@starknet-io/types-js`, `starknet@10.5.0`):
+   `STRK20_ACTION = deposit | withdraw | transfer | invoke` ONLY
+   (`components.d.ts`). `WalletAccountV6`: `strk20Balances`,
+   `strk20PrepareInvoke`, `strk20InvokeTransaction`, `executeWithProof`. **No
+   sub-account / shadow / compute / identity action exists** in the installed
+   SDK. `grep` for `shadow|subaccount|compute` in `starknet/dist/index.d.ts`
+   returns only unrelated hits (pre-computed hashes).
+2. **Official Starknet blog "Push to Private" (2026-07-15):** "Coming next:
+   private sub-accounts, which will let apps run everyday transactions …
+   through accounts with no public onchain link back to a user's main wallet.
+   **Not live yet; wallet and SDK support are still landing.**" → private
+   sub-accounts CONFIRMED UNAVAILABLE. Not invented, not faked.
+3. **Pinned pool source (`starknet-privacy@bc75e4b`) DOES contain**
+   `privacy_invoke_with_computation` + `ComputeAndInvoke` (`ClientAction`) +
+   `privacy_compute(identity_key, …)` ("linked to the user but cannot be traced
+   back to them") + a full `shadow_account_anonymizer` package (Primer +
+   `starkware_accounts`, `Delegated` screening). BUT it is reachable only via
+   the SDK route (viewing-key management, GitHub-Packages-only, not installed
+   here) or a compute-capable wallet — Ready X + Wallet API 0.10.3 cannot
+   express it, and deployed-pool support is unverified. → **NOT built on.**
+   Documented in `docs/PRIVATE_INVESTIGATOR.md` as the future upgrade path.
+4. **Ethos (re-verified 2026-09-07):** EVM/Base only; REST
+   `api.ethos.network` keyed by EVM address (`X-Ethos-Client` header);
+   credibility 0–2800, default 1200 neutral; no Starknet contract, no ZK
+   anonymous credential in production. → `IReputationProvider` kept as the
+   plug-in boundary; Verity-native commitment-keyed reputation now; Ethos via a
+   future oracle attesting **commitments** (compatible without trait change —
+   commitments are felts, castable to the trait's address key).
+5. **Available and proven in THIS repo:** pool-routed `privacy_invoke` via
+   wallet `invoke` (bare-invoke = Gate2 PROOF pattern; `withdraw→helper +
+   invoke` = Phase 3 FUND pattern), Poseidon in Cairo
+   (`poseidon_hash_span`) + starknet.js (`computePoseidonHashOnElements`) with
+   proven parity (fund-lock test), secret-bound single-use auth consumed
+   atomically in the same tx.
+
+### 36.2 Design: commitment identity + real-STRK escrow + hash-chain auth
+
+- **Private identity = genesis tip of a Poseidon hash chain** (`felt252`,
+  stable, stored). Seed never leaves the device. No wallet address appears in
+  ANY stake/reputation/submission record for private identities.
+- **Private stake = real STRK** via `[withdraw stake_amount → helper, invoke
+  STAKE_IDENTITY(identity, tip, chain_len=64, amount, nonce)]` (Phase 3 FUND
+  pattern). Helper escrows per-identity + enforces a **balance-backed solvency
+  check** (`balance >= total_stake_held + amount`, stronger than FUND, funding
+  untouched). Permissionless first-claim; front-running a commitment locks only
+  the attacker's own funds (no seed → unusable), victim retries with new seed.
+- **Submit/challenge/unstake/payout-register auth = hash-chain preimages**
+  (one-time, consumed atomically; long-term seed never on-chain). Submit and
+  payout-register are **pool-routed** (relayer-submitted → no tx-sender link);
+  challenge is a direct call from ANY account (preimage is the auth; sender
+  semantically irrelevant, cheaper, no new linkage).
+- **Reputation keyed by identity:** baseline 60 at registration, +10 winner
+  (cap 100), −20 slash (floor 0), threshold 60 enforced — all existing
+  economics preserved and configurable (`set_stake_amount`,
+  `set_minimum_reputation`). Legacy wallet-keyed paths (`stake()`,
+  `submit_investigation`, rep maps, `IReputationProvider` trait) FROZEN,
+  untouched, still tested.
+- **BM ↔ helper callbacks** (established pattern, local dispatcher traits, no
+  new package deps): helper→BM `register_stake_identity`,
+  `submit_private`, `register_private_payout_lock`, `consume_preimage`;
+  BM→helper `slash_stake` (escrow → owner treasury) + view `get_stake_escrow`.
+  Existing `RELEASE` op reused UNCHANGED for private winners (lock now set via
+  the private register op).
+- **Submission struct gains `identity: felt252`** (`0` = legacy wallet
+  submission; unwritten storage slots read 0 → old Sepolia reads safe). New
+  event `PrivateInvestigationSubmitted`. Winner stored as identity-cast
+  address for private wins (displayed `#xxxx` as today).
+- **Honest privacy statement:** stake record holds no wallet data (origin
+  hidden by the pool's private withdraw leg; fixed 1 STRK amount + timing
+  remain observable — same edge-visibility as funding). Pool-routed invoke
+  calldata is post-tx public but unattributed. NO wallet→identity record
+  exists; correlation needs timing heuristics. Documented, never oversold.
+
+### 36.3 Economics preserved (§12): stake 1 STRK, min rep 60, +10 / −20,
+protocol fee 500 bps — all unchanged, all configurable as before.
+
+### 36.4 Pre-implementation state
+
+- Branch `main`, HEAD `ebb6887` (pushed, in sync); only `next-env.d.ts`
+  modified (generated artifact, not staged).
+- Deployer `ready-sepolia` STRK balance re-read live: **~20.69 STRK** —
+  INSUFFICIENT for two declares (~34 STRK each last time). Faucet top-up
+  needed before Sepolia redeploy; implementation + local verification first.
+- Baseline to beat: `scarb build` ok, `snforge` 52+21, `tsc` 0, `next build`
+  7/7, `node --test` 31/34 pass.
+
+## 37. PRIVATE STAKING + REPUTATION — DONE checkpoint (2026-09-07, Muse Spark)
+
+**Design:** §36 (commitment identity + real-STRK escrow + hash-chain auth).
+Economics preserved: stake 1 STRK, min rep 60, +10 win (cap 100), −20 slash
+(floor 0), fee 500 bps — all unchanged, all still configurable.
+
+### 37.1 Contracts (additive; legacy wallet paths frozen, all old tests pass)
+
+- `types.cairo`: `Submission.identity: felt252` (`0` = legacy; unwritten
+  storage reads 0 → old Sepolia reads safe).
+- `bounty_manager.cairo`: identity maps (`id_tip/tip_owner/registered/
+  reputation/slashed/chain_len`, `private_payout_locks`) + entries
+  `register_stake_identity` / `submit_private` / `challenge_private_report`
+  (ANY direct caller — preimage is the auth) /
+  `register_private_payout_lock` / `consume_preimage_by_tip` + views
+  (`get_identity_tip/reputation`, `is_identity_{registered,slashed,eligible}`,
+  `get_identity_stake`, `get_private_payout_lock`) + local
+  `IStakeHelper` dispatcher (no package cycle) + `identity_to_address` +
+  `IDENTITY_CHAIN_LEN = 64`. `select_winner` credits +10 to the identity for
+  private wins; `resolve_report` slashes the exact identity and calls
+  helper `slash_stake`. `IReputationProvider` untouched; identities delegate
+  through it (commitment-as-key) when a provider is set — the Ethos oracle
+  path needs no trait change.
+- `verity_anonymizer.cairo`: ops `STAKE_IDENTITY / SUBMIT_PRIVATE /
+  REGISTER_PAYOUT / UNSTAKE_IDENTITY` in the UNCHANGED 6-arg `privacy_invoke`
+  (per-op slot table in code + `docs/PRIVATE_INVESTIGATOR.md` §2;
+  FUND/REFUND/RELEASE calldata byte-identical) + `stake_escrow` /
+  `total_stake_held` with a **solvency check** (`balance ≥ held + amount` —
+  unbacked stakes revert) + `slash_stake` (BM-only, escrow → owner treasury)
+  + `get_stake_escrow` view. Existing RELEASE reused unchanged for private
+  winners (verified lock lands in the same `payout_locks` map).
+
+### 37.2 Tests (all structural; labeled local verification, not protocol)
+
+- `snforge`: **96 passed, 0 failed** (was 52+21=73).
+  - BM `private_identity_test.cairo` (19): parity with JS vectors, baseline
+    60, no-wallet-in-record asserts, idempotent re-register, direct-caller
+    rejection, wrong-amount rejection, no-escrow gating, two-submit linkage,
+    replay/forgery/threshold rejections, win rep 60→70, challenge from a
+    STRANGER account (proves no wallet binding), wrong-preimage challenge
+    rejection, slash-hits-A-only (B live), slashed-cannot-submit/restake,
+    creator-cannot-set-threshold, resolve-without-report reverts, payout-lock
+    register + loser rejection.
+  - BM `anonymizer_callback_shape_test.cairo` (+1): all new helper→BM shapes
+    against the REAL BM (pins signature sync).
+  - Helper `stake_test.cairo` (24): backed escrow, unbacked/partial backing
+    reverts (forge-proof), duplicates, NOT_POOL ×3, slot validation ×7,
+    wrong-amount, submit/reg-payout relays, exact unstake note + exact
+    allowance, slashed/no-stake/unknown-preimage blocks, slash-to-treasury +
+    non-BM rejection, A/B isolation, nonce replay.
+  - All 12 legacy BM + all 38 legacy helper tests pass unchanged.
+- `node --test`: **50 passed** (31 bounty incl. 10-STRK round-trip +
+  19 identity: chain vectors == snforge constants, op constants ==
+  `encodeShortString`, slot shapes, FELT-regex validity).
+- `tsc --noEmit` EXIT 0; `next build` 7/7.
+- Secret scan: no seeds/preimages/secrets in diffs (test vectors are public
+  fixtures by design).
+
+### 37.3 Frontend (`bounty/[id]` only; creation/funding untouched)
+
+- `lib/identity-pure.ts` (new): chain/seed/storage/action builders; seeds in
+  `localStorage` only, integrity-checked on load.
+- Eligibility panel: private-stake primary ("Stake privately", "Private
+  stake … Verified ✓", "Reputation 70/100", "Eligible ✓"), legacy public
+  staking kept as a labeled fallback. No felt/calldata/jargon in UI.
+- Private submit (pool-routed, identity-eligible only), private
+  payout-register + claim branch for private winners, any-account private
+  challenge, private unstake. Legacy flows unchanged. New errors mapped to
+  friendly copy (incl. `INVALID_OP` → "not live on this deployment yet").
+
+### 37.4 Sepolia deployment: BLOCKED on funds (exact evidence)
+
+- `sncast -a ready-sepolia declare --network sepolia --package
+  bounty_manager --contract-name BountyManager` → **FAILED pre-inclusion**:
+  `Resources bounds (…) exceed balance (20689026552366680208)` (~20.69 STRK;
+  last declare cost ~34 STRK). Nothing spent, nothing deployed.
+- **Next step (needs a funded wallet — agent cannot faucet):** top up
+  `ready-sepolia` (`0xdc46…420ca5`) via the Sepolia faucet to ≥ ~80 STRK,
+  then: declare BM → deploy (owner `0xdc46…`) → declare helper → deploy
+  `(pool 0x0254…, BM, owner, 0→STRK)` → `BM.set_anonymizer(new)` →
+  `helper.set_bounty_manager(BM)` → verify reads → update `CONTRACTS` +
+  `strk20.json` → wallet-test stake→submit→select→claim→unstake on a fresh
+  bounty. Until then the UI degrades gracefully (identity views → null;
+  private txs → honest "not live yet" message).
+- No mainnet action taken (per rules).
+
+### 37.5 Acceptance mapping (honest)
+
+- Existing functionality: creation/reward/CREATE→FUND→OPEN/submit-select-
+  claim-refund all preserved (regression suites green; funding calldata
+  untouched). Browser-wallet re-verification of the full private lifecycle on
+  the NEW deployment is PENDING (same class of manual step as §35).
+- Private staking/reputation: implemented per §§20–21 test matrix at contract
+  level; wallet-signed STRK20 legs (STAKE/SUBMIT/UNSTAKE) pending the redeploy
+  + manual signing (agent cannot sign).
+- Privacy claims: exactly §5 of `docs/PRIVATE_INVESTIGATOR.md` — commitment
+  pseudonymity over the real pool flow; sub-accounts NOT claimed (verified
+  unavailable); Ethos NOT claimed (kept behind `IReputationProvider`).
+
+**Files in this checkpoint:** contracts BM + types + helper; 3 test files
+(2 new, 1 extended); `apps/web/{lib/identity-pure.ts,
+lib/identity.regression.test.ts, app/bounty/[id]/page.tsx, package.json}`;
+root `package.json`; `docs/{PRIVATE_INVESTIGATOR.md (new), ARCHITECTURE.md,
+AI_HANDOFF.md}`.
+
 
 
 
