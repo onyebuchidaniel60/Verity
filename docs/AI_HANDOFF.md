@@ -2017,3 +2017,12 @@ C. Report per step: tx hash or exact error + console
 D. Success only when Voyager shows ACCEPTED_ON_L2 AND chain views confirm
    (stake escrow, eligibility, submission, Paid). Until then: deployed and
    wired, NOT yet wallet-proven — do not claim private staking is finished.
+
+### 41.4 Git checkpoint
+
+- Commit `05ba399` (`feat(sepolia): deploy private-staking V3 contracts, wire,
+  point frontend at verified addresses`): contracts.ts + strk20.json +
+  PRIVATE_INVESTIGATOR.md + this handoff. Pre-commit review: only intended
+  files, no secrets/keys (public addresses + tx hashes only).
+- Pushed `5be637f..05ba399 main -> main`; local `main` == `origin/main` ==
+  `05ba399` (verified via live `git ls-remote`).
