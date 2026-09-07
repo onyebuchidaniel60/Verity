@@ -1355,6 +1355,36 @@ behavior). **Changed:** detail page (diagnostic log only) + this §31.
 **Tests:** `tsc` 0, `next build` 7/7, `node --test` 31 pass (unchanged),
 `snforge` 21 pass (unchanged, contracts untouched).
 
+## 32. PHASE 3 FUNDING ARCHITECTURE AUDIT (2026-09-07, Muse Spark)
+
+**Directive:** no code changes — protocol-design checkpoint. Deliverable:
+`docs/PHASE3_FUNDING_AUDIT.md` (full report, §§A–J + 12-question trace +
+owner decisions D1/D2). This §32 is the pointer + verdict summary.
+
+**Headline findings (all evidenced in the report):**
+
+- Pinned rev vs deployed pool: **CONSISTENT** (`CONTRACT_VERSION '2.1'` both
+  sides; same `privacy_invoke` selector and `OpenNoteDeposit` layout). No
+  upgrade. Live pool: fee 2 STRK; our helper screening policy `Required`.
+- Corrected FUND needs NO new protocol: `[withdraw reward→helper, invoke
+  FUND]` with the helper keeping public escrow and returning NO deposits
+  (hence no backing pull, no screening attestation, no approve on fund).
+  Creator-binding via funding-secret locks (hash-committed through
+  creator-authenticated direct calls — enforceable because direct-call
+  callers are real, unlike pool-routed ones).
+- RELEASE requires winner-registered payout locks + exact-approve on release
+  (naive first-come release would allow theft — REJECTED in the report).
+- ** blast radius: `VerityAnonymizer` redeploy ONLY; `BountyManager`
+  untouched** (bounties #1–#10 persist; existing CREATED bounties fundable
+  under the new flow after `set_locks`); old helper holds 0, nothing
+  migrates; deployment deps: `set_anonymizer` wiring + screening exemption
+  for the release path.
+- Privacy accounting is honest (public legs named, anonymity sets named, no
+  "invisible" claims). Funding a locked CREATED bounty = exactly 1 signing.
+
+**Awaiting owner:** D1 (secret-bound vs permissionless funding), D2 (green
+light to implement). No staking/identity work started.
+
 
 
 
