@@ -1929,3 +1929,91 @@ C. Report back per step: tx hash or exact error + console
    [stakePrivate]/[submitPrivate]/[fundPrivate] lines.
 D. Do NOT mark success until Voyager shows ACCEPTED_ON_L2 + chain
    views confirm (escrow, eligibility, submission, Paid).
+
+## 41. REDEPLOY — FUNDED, EXECUTING (2026-09-07, Muse Spark)
+
+### 41.1 Fresh funding state (live, this session — old numbers superseded)
+
+- Deployer `ready-sepolia`
+  `0xdc464532bfe260c48f5f555262dca74b45ad4b11a5a04914405be80d420ca5`
+  STRK balance re-read LIVE via `balanceOf` call: **113172008552366680208 fri
+  (~113.17 STRK)**. The old `~20.69 STRK` figure is stale; user top-up confirmed.
+- Live Sepolia L2 gas price at check: **~27.7e9 fri**
+  (block 14704292, still congested; calm reference ~1.76e9).
+- Fresh `--dry-run --detailed` estimates at that price:
+  - BountyManager declare: **~63.31 STRK** (L2 2283161280 units @ 27729040458)
+  - VerityAnonymizer declare: **~22.48 STRK** (L2 809202880 units @ 27784498538)
+  - Declares total: **~85.79 STRK** < 113.17 balance.
+  - Remainder ~27 STRK covers deploys + 2 wiring invokes (each expected <2 STRK).
+  - Verdict: FULL sequence affordable now. Proceeding to broadcast.
+- Pre-broadcast verification: `scarb build` exit 0; `snforge test` **126/126**;
+  constructor ABI re-read from fresh artifacts (BM `(owner)`; helper
+  `(pool, bounty_manager, owner, strk_token)` with `0x0` = protocol STRK
+  constant); `privacy_invoke` 6-arg + `set_anonymizer`/`set_bounty_manager`
+  confirmed. Deploying HEAD (includes 8361a5d staking + 0faa42e creator alias).
+- Deploy order: declare BM -> deploy BM (owner 0xdc46...ca5) ->
+  declare helper -> deploy helper (pool 0x0254..., new BM, owner 0xdc46...ca5,
+  0x0) -> wire both ways -> verify reads -> update frontend + strk20.json.
+
+### 41.2 Deployment EXECUTED 2026-09-07 (all ACCEPTED_ON_L2 + Succeeded)
+
+- Auto-estimate declare refused client-side (1.5x padded bounds ~144 STRK >
+  113.17 balance). Broadcast with explicit bounds from the dry-run
+  consumption (+7-11% amount, +28-32% price; max ~88.5 STRK for BM,
+  ~32.4 STRK for helper): NOT an under-bid — actual fees landed within
+  1% of estimate. Prior explicit-bounds failure was a 10x-under-market
+  price (2.5e9 vs 28e9); this time bounds tracked the live price.
+- 1. Declare BM: `0x026191caae33f45de9a9d1fd9700045c2060c8a7a0a6fd1b640e8d280b043d7b`,
+  block 14704461, fee 64080691021105659456 fri (~64.08 STRK).
+  Class `0x448d50706a4bf5a0d9d1812ad114ba2e1a540b6092d5a58715c8ed2021e06cd`.
+- 2. Deploy BM: `0x012250b3e36aa7a4ebe011d85cf976a4c611e7d4f94126f6659e4c49ce9edf05`,
+  block 14704479, fee ~0.106 STRK.
+  Address `0x04315e84d96b7d0e4daf4d0ee0382d3951a4963a85d6b7572520cb4155135807`
+  (owner = deployer 0xdc46...ca5).
+- 3. Declare helper: `0x039265ac7f350b744755b791342433f29caf57c51209214c0be5f4bf8076d532`,
+  block 14704506, fee 22711696504838644544 fri (~22.71 STRK).
+  Class `0x07977502e7870198401a84e86e876df781cf37082685b3a2ab1c513d8e1e65b6`.
+- 4. Deploy helper: `0x061b7864144fb87a2021ee220964ce247b9b7859641c5c12c2985278c2367c37`,
+  block 14704524, fee ~0.094 STRK.
+  Address `0x03602dc4f3a8bd209d47fca442c87f22151536e6ed7387b7025e92c4ebcf9682`
+  (pool 0x0254..., new BM, owner 0xdc46...ca5, 0x0).
+- 5. `set_anonymizer`: `0x04bacc91d9f9c6aa45521283abfb37c47e7ea9806205e74dcabe6923158a4357`,
+  block 14704536, fee ~0.046 STRK.
+- 6. `set_bounty_manager`: `0x050d60385f7c191d80cf58ad48f94c427a1350a1623a46747443fee49e8ebc1b`,
+  block 14704552, fee ~0.034 STRK.
+- Verification reads: `get_anonymizer` = helper; `get_bounty_manager` = BM;
+  `get_pool` = 0x0254...; `get_strk_token` = 0x04718... (0x0 resolved to the
+  protocol STRK constant); versions `VERITY_BOUNTY_MANAGER_V2` /
+  `VERITY_ANONYMIZER_V2` (short-string felts confirmed on-chain).
+- Total spend ~87.07 STRK; deployer remainder ~26.10 STRK (re-read live).
+- Frontend `CONTRACTS` now points at V3 (both addresses, no mixed old/new);
+  stale-address grep: only history comment + pure-test fixture remain
+  (intentional). `strk20.json`: +2 contracts, +6 txs, notes updated.
+- Regression: `snforge test` 126/126, `tsc --noEmit` 0, bounty 34/34,
+  identity 20/20, `next build` 7/7 — all AFTER the address update.
+
+### 41.3 Remaining: real-wallet private staking test (needs the user)
+
+The agent cannot sign Ready-wallet STRK20 transactions, so the final
+end-to-end proof needs the user on the NEW V3 deployment
+(frontend already points there; run `pnpm dev:web`):
+
+A. Investigator (fresh Ready wallet recommended):
+1. Pick/create a bounty (new BM starts empty — create + fund privately first,
+   or use a second wallet as creator per B below).
+2. FIRST: Ready -> enable privacy/STRK20, finish private setup, shield
+   >= 4 STRK (1 stake + pool fees).
+3. Click Stake Privately (1 STRK) -> ONE wallet approval (withdraw 1 STRK to
+   helper `0x03602dc4...` + invoke STAKE_IDENTITY); proving takes 10-60s.
+4. Expect: Private stake 1 STRK Verified + Reputation 60/100 + Eligible;
+   persists on reload (chain-read, never localStorage).
+5. Submit investigation -> ONE bare-invoke approval (SUBMIT_PRIVATE) ->
+   submission appears as Anonymous #xxxx.
+B. Creator (second wallet): create privately -> set payout address ->
+   set locks -> fund privately -> open -> review -> select winner ->
+   winner registers payout lock + claims privately.
+C. Report per step: tx hash or exact error + console
+   [stakePrivate]/[submitPrivate]/[fundPrivate] lines.
+D. Success only when Voyager shows ACCEPTED_ON_L2 AND chain views confirm
+   (stake escrow, eligibility, submission, Paid). Until then: deployed and
+   wired, NOT yet wallet-proven — do not claim private staking is finished.

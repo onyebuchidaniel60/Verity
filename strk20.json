@@ -47,6 +47,24 @@
       "deploy_tx": "0x0716582e3a9917ed3d3423397a426ee354ccb66a1c555fe0501693cd76aa44a0",
       "network": "sepolia",
       "verified": true
+    },
+    {
+      "name": "BountyManager V3 (private staking + creator alias)",
+      "address": "0x04315e84d96b7d0e4daf4d0ee0382d3951a4963a85d6b7572520cb4155135807",
+      "class_hash": "0x448d50706a4bf5a0d9d1812ad114ba2e1a540b6092d5a58715c8ed2021e06cd",
+      "declare_tx": "0x026191caae33f45de9a9d1fd9700045c2060c8a7a0a6fd1b640e8d280b043d7b",
+      "deploy_tx": "0x012250b3e36aa7a4ebe011d85cf976a4c611e7d4f94126f6659e4c49ce9edf05",
+      "network": "sepolia",
+      "verified": true
+    },
+    {
+      "name": "VerityAnonymizer V3 (private staking + creator alias, 6-arg)",
+      "address": "0x03602dc4f3a8bd209d47fca442c87f22151536e6ed7387b7025e92c4ebcf9682",
+      "class_hash": "0x07977502e7870198401a84e86e876df781cf37082685b3a2ab1c513d8e1e65b6",
+      "declare_tx": "0x039265ac7f350b744755b791342433f29caf57c51209214c0be5f4bf8076d532",
+      "deploy_tx": "0x061b7864144fb87a2021ee220964ce247b9b7859641c5c12c2985278c2367c37",
+      "network": "sepolia",
+      "verified": true
     }
   ],
   "transactions": [
@@ -263,9 +281,57 @@
       "type": "set_anonymizer V2 -> VerityAnonymizer V2 0x07aa8479...",
       "network": "sepolia",
       "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x026191caae33f45de9a9d1fd9700045c2060c8a7a0a6fd1b640e8d280b043d7b",
+      "type": "declare BountyManager V3 (private staking + creator alias)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2",
+      "block": 14704461,
+      "actual_fee_fri": "64080691021105659456"
+    },
+    {
+      "hash": "0x012250b3e36aa7a4ebe011d85cf976a4c611e7d4f94126f6659e4c49ce9edf05",
+      "type": "deploy BountyManager V3 0x04315e84...",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2",
+      "block": 14704479,
+      "actual_fee_fri": "105663648048277376"
+    },
+    {
+      "hash": "0x039265ac7f350b744755b791342433f29caf57c51209214c0be5f4bf8076d532",
+      "type": "declare VerityAnonymizer V3 (private staking + creator alias)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2",
+      "block": 14704506,
+      "actual_fee_fri": "22711696504838644544"
+    },
+    {
+      "hash": "0x061b7864144fb87a2021ee220964ce247b9b7859641c5c12c2985278c2367c37",
+      "type": "deploy VerityAnonymizer V3 0x03602dc4...",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2",
+      "block": 14704524,
+      "actual_fee_fri": "94057384217172416"
+    },
+    {
+      "hash": "0x04bacc91d9f9c6aa45521283abfb37c47e7ea9806205e74dcabe6923158a4357",
+      "type": "set_anonymizer V3 -> VerityAnonymizer V3 0x03602dc4...",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2",
+      "block": 14704536,
+      "actual_fee_fri": "46472561701758048"
+    },
+    {
+      "hash": "0x050d60385f7c191d80cf58ad48f94c427a1350a1623a46747443fee49e8ebc1b",
+      "type": "set_bounty_manager VerityAnonymizer V3 -> BountyManager V3",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2",
+      "block": 14704552,
+      "actual_fee_fri": "33961808029310208"
     }
   ],
   "demo_video": "",
   "demo_url": "",
-  "notes": "Sepolia V2 + secret-bound helper: BountyManager V2 0x03643a... (unchanged, staking 1 STRK, rep 60) + VerityAnonymizer V2 0x07aa8479... (locks+escrow, 6-arg) + pool 0x0254... Old helper 0x04b93a... obsolete (balance was 0, nothing migrated). Private funding test with real wallet signing still pending (see docs/AI_HANDOFF.md). Mainnet pending."
+  "notes": "Sepolia V3 (private staking + creator alias, 2026-09-07): BountyManager 0x04315e84... (class 0x448d5070...) + VerityAnonymizer 0x03602dc4... (class 0x07977502...) + pool 0x0254..., wired both ways, all 6 txs ACCEPTED_ON_L2 (total fees ~87.07 STRK). Frontend CONTRACTS points at V3. Old V2 contracts (BM 0x03643a..., helper 0x07aa8479...) superseded. Private staking test with real wallet signing still pending (see docs/AI_HANDOFF.md). Mainnet pending."
 }

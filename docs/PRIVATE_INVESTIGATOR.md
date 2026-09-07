@@ -236,12 +236,41 @@ caller (which verified the single-use refund secret first) on both paths.
 
 ## 11. Deployment note
 
-BM + helper interfaces both changed ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ both must be redeclared/redeployed and
+~~BM + helper interfaces both changed — both must be redeclared/redeployed and
 rewired (`set_anonymizer` / `set_bounty_manager`), then `CONTRACTS` +
 `strk20.json` updated. Deployer `ready-sepolia` held **~20.69 STRK** at build
-time ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â below the last observed declare cost (~34 STRK) ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â so the redeploy
+time — below the last observed declare cost (~34 STRK) — so the redeploy
 needs a faucet top-up first. Old deployments stay live but are superseded
-(new BM starts empty), following the established pattern.
+(new BM starts empty), following the established pattern.~~
+
+**DEPLOYED 2026-09-07 (V3, Sepolia).** After the user topped up `ready-sepolia`
+to ~113.17 STRK, the full sequence was executed and verified on-chain:
+
+- BountyManager V3 `0x04315e84d96b7d0e4daf4d0ee0382d3951a4963a85d6b7572520cb4155135807`
+  (class `0x448d50706a4bf5a0d9d1812ad114ba2e1a540b6092d5a58715c8ed2021e06cd`,
+  declare `0x026191caae33f45de9a9d1fd9700045c2060c8a7a0a6fd1b640e8d280b043d7b`
+  block 14704461 fee ~64.08 STRK; deploy
+  `0x012250b3e36aa7a4ebe011d85cf976a4c611e7d4f94126f6659e4c49ce9edf05`
+  block 14704479 fee ~0.106 STRK; constructor owner = deployer).
+- VerityAnonymizer V3 `0x03602dc4f3a8bd209d47fca442c87f22151536e6ed7387b7025e92c4ebcf9682`
+  (class `0x07977502e7870198401a84e86e876df781cf37082685b3a2ab1c513d8e1e65b6`,
+  declare `0x039265ac7f350b744755b791342433f29caf57c51209214c0be5f4bf8076d532`
+  block 14704506 fee ~22.71 STRK; deploy
+  `0x061b7864144fb87a2021ee220964ce247b9b7859641c5c12c2985278c2367c37`
+  block 14704524 fee ~0.094 STRK; constructor
+  `(pool 0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91,
+  new BM, owner 0xdc46...ca5, 0x0 = protocol STRK)`).
+- Wiring: `set_anonymizer` (`0x04bacc91d9f9c6aa45521283abfb37c47e7ea9806205e74dcabe6923158a4357`,
+  block 14704536) + `set_bounty_manager`
+  (`0x050d60385f7c191d80cf58ad48f94c427a1350a1623a46747443fee49e8ebc1b`,
+  block 14704552); all 6 txs ACCEPTED_ON_L2 + Succeeded.
+- Verified reads: `get_anonymizer` = helper, `get_bounty_manager` = BM,
+  `get_pool` = `0x0254...`, `get_strk_token` = `0x04718...` (the `0x0`
+  constructor arg correctly resolved to the protocol STRK constant),
+  versions `VERITY_BOUNTY_MANAGER_V2` / `VERITY_ANONYMIZER_V2`.
+- `CONTRACTS` + `strk20.json` updated to V3. Total spend ~87.07 STRK;
+  deployer remainder ~26.10 STRK. Old V2 deployments stay live but are
+  superseded (new BM starts empty), following the established pattern.
 
 ---
 
