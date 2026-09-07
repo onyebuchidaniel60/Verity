@@ -2286,3 +2286,7 @@ rejects decimal calldata — `invalid dec string` — same hex discipline.)
 - STRK `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`
 - STRK20 pool `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`
 - Commit for this checkpoint: (recorded after push below).
+- Commit: `4cef16f` (`fix(verity): hex public-invoke transport for all
+  writes, pending-identity stake recovery`). Pushed
+  `38787c8..4cef16f main -> main`; verified `main...origin/main` in sync
+  and live `git ls-remote origin main` returns `4cef16f`.
