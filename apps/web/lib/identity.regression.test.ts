@@ -26,7 +26,23 @@ import {
   buildCreateActions,
   verifyOpConstants,
   submitGate,
+  fetchInvestigatorState,
+  saveIdentity,
+  loadIdentity,
+  clearIdentity,
+  generateIdentitySeed,
 } from "./identity-pure.ts";
+
+// Node has no localStorage: minimal in-memory stub so the real
+// save/load functions (not mocks) are exercised for persistence.
+if (typeof (globalThis as any).localStorage === "undefined") {
+  const mem = new Map<string, string>();
+  (globalThis as any).localStorage = {
+    getItem: (k: string) => (mem.has(k) ? mem.get(k)! : null),
+    setItem: (k: string, v: string) => { mem.set(k, String(v)); },
+    removeItem: (k: string) => { mem.delete(k); },
+  };
+}
 
 const VECTORS: Record<string, { c1: string; c2: string; c62: string; c63: string; c64: string }> = {
   "0x1234": {
@@ -190,5 +206,111 @@ describe("helpers", () => {
   it("evidenceToFelt encodes text, rejects empty", () => {
     assert.equal(evidenceToFelt("hi"), "0x6869");
     assert.throws(() => evidenceToFelt("   "));
+  });
+});
+
+describe("investigator-state refresh (stake -> eligible without reload)", () => {
+  // Live Sepolia V3 fixtures (read 2026-09-07 from 0x04315e84...): a staked
+  // identity reports registered=true, rep 60/60, unslashed, eligible=true,
+  // 1 STRK escrow. starknet.js returns named objects with bigint numerics.
+  const STAKED_VIEWS: Record<string, unknown> = {
+    get_identity_reputation: { rep: 60n },
+    is_identity_registered: { registered: true },
+    is_identity_slashed: { slashed: false },
+    is_identity_eligible: { eligible: true },
+    get_identity_stake: { amount: 1000000000000000000n },
+    get_minimum_reputation: { min: 60 },
+    get_stake_amount: { amt: 1000000000000000000n },
+  };
+  const UNSTAKED_VIEWS: Record<string, unknown> = {
+    get_identity_reputation: { rep: 0 },
+    is_identity_registered: { registered: false },
+    is_identity_slashed: { slashed: false },
+    is_identity_eligible: { eligible: false },
+    get_identity_stake: { amount: 0n },
+    get_minimum_reputation: { min: 60 },
+    get_stake_amount: { amt: 1000000000000000000n },
+  };
+  const mockCall = (views: Record<string, unknown>) => async (fn: string) => {
+    if (!(fn in views)) throw new Error(`unexpected view ${fn}`);
+    return views[fn];
+  };
+  const identity = VECTORS["0x1234"].c64;
+
+  it("staked chain state derives eligible + 1 STRK + rep 60/60", async () => {
+    const r = await fetchInvestigatorState(mockCall(STAKED_VIEWS), identity);
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.errors, {});
+    assert.equal(r.state?.eligible, true);
+    assert.equal(r.state?.registered, true);
+    assert.equal(r.state?.reputation, 60);
+    assert.equal(r.state?.minRep, 60);
+    assert.equal(r.state?.escrowWei, 1000000000000000000n);
+    assert.equal(r.state?.slashed, false);
+    // The refreshed state opens the submit gate (no reload needed).
+    assert.equal(submitGate({ loaded: true, privateEligible: r.state!.eligible, legacyEligible: false }), "eligible");
+  });
+
+  it("eligibility flips false -> true after stake (pre/post refresh)", async () => {
+    const before = await fetchInvestigatorState(mockCall(UNSTAKED_VIEWS), identity);
+    assert.equal(before.ok, true);
+    assert.equal(before.state?.eligible, false);
+    assert.equal(submitGate({ loaded: true, privateEligible: before.state!.eligible, legacyEligible: false }), "blocked");
+    const after = await fetchInvestigatorState(mockCall(STAKED_VIEWS), identity);
+    assert.equal(after.state?.eligible, true);
+    assert.equal(submitGate({ loaded: true, privateEligible: after.state!.eligible, legacyEligible: false }), "eligible");
+  });
+
+  it("one flaky read is reported, never a silent 'not staked'", async () => {
+    const flaky = { ...STAKED_VIEWS };
+    const r = await fetchInvestigatorState(async (fn: string) => {
+      if (fn === "is_identity_eligible") throw new Error("RPC timeout");
+      return (flaky as Record<string, unknown>)[fn];
+    }, identity);
+    assert.equal(r.ok, false);
+    assert.equal(r.state, null);
+    assert.match(r.errors["is_identity_eligible"] ?? "", /timeout/);
+  });
+
+  it("raw + named response shapes both parse", async () => {
+    const r = await fetchInvestigatorState(async (fn: string) => {
+      switch (fn) {
+        case "get_identity_reputation": return 60n;
+        case "is_identity_registered": return true;
+        case "is_identity_slashed": return false;
+        case "is_identity_eligible": return 1n;
+        case "get_identity_stake": return 1000000000000000000n;
+        case "get_minimum_reputation": return 60;
+        case "get_stake_amount": return "1000000000000000000";
+        default: throw new Error(`unexpected view ${fn}`);
+      }
+    }, identity);
+    assert.equal(r.ok, true);
+    assert.equal(r.state?.eligible, true);
+    assert.equal(r.state?.reputation, 60);
+  });
+
+  it("identity persists across reload (save -> load round-trip)", () => {
+    clearIdentity();
+    assert.equal(loadIdentity(), null);
+    const seed = generateIdentitySeed();
+    const tip = genesisTip(seed);
+    saveIdentity({ seed, identity: tip, nextK: 63, backedUp: false });
+    const reloaded = loadIdentity(); // models a page refresh
+    assert.ok(reloaded);
+    assert.equal(reloaded!.identity.toLowerCase(), tip.toLowerCase());
+    assert.equal(reloaded!.nextK, 63);
+    clearIdentity();
+  });
+
+  it("tampered stored identity is rejected, never used for reads", () => {
+    const seed = generateIdentitySeed();
+    saveIdentity({ seed, identity: genesisTip(seed), nextK: 63, backedUp: false });
+    const raw = (globalThis as any).localStorage.getItem("verity_identity") as string;
+    const parsed = JSON.parse(raw);
+    parsed.identity = "0x1234"; // attacker/corruption edit
+    (globalThis as any).localStorage.setItem("verity_identity", JSON.stringify(parsed));
+    assert.equal(loadIdentity(), null);
+    clearIdentity();
   });
 });

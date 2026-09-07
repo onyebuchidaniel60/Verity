@@ -263,6 +263,94 @@ export function verifyOpConstants(): Record<string, boolean> {
   };
 }
 
+// ---- Authoritative investigator-state refresh (single source of truth) ----
+// fetchInvestigatorState performs the seven chain reads that determine
+// private-staking eligibility. Each read is isolated: one flaky RPC call can
+// no longer silently nuke the whole state (the old Promise.all + bare catch
+// set identityInfo=null on ANY single failure, indistinguishable from "not
+// staked"). Callers log `raw` (commitments only — seeds/preimages never leave
+// the device and are never logged) to prove which case holds: chain-staked
+// vs not-staked vs read-failed vs wrong-identity.
+
+export interface InvestigatorState {
+  registered: boolean;
+  reputation: number;
+  minRep: number;
+  escrowWei: bigint;
+  eligible: boolean;
+  slashed: boolean;
+  stakeAmountWei: bigint;
+}
+
+export interface InvestigatorStateRefresh {
+  /** True only when every read succeeded and values derived cleanly. */
+  ok: boolean;
+  /** Derived values (null unless ok). Drives eligible UI + submit gate. */
+  state: InvestigatorState | null;
+  /** Per-entrypoint failure messages (empty when ok). */
+  errors: Record<string, string>;
+  /** Raw view results (bigint-safe via replacer when logging). */
+  raw: Record<string, unknown>;
+}
+
+function boolView(r: unknown): boolean {
+  const v = (r as any)?.eligible ?? (r as any)?.registered ?? (r as any)?.slashed ?? r;
+  return v === true || v === 1 || v === 1n || String(v).toLowerCase() === "true";
+}
+
+function numView(r: unknown, key: string, fallback: number): number {
+  const n = Number((r as any)?.[key] ?? r);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function bigView(r: unknown, key: string): bigint {
+  return BigInt((r as any)?.[key] ?? r);
+}
+
+/** Refresh investigator state for one identity commitment.
+ *  `callFn` is Contract.call in production, a stub in tests. */
+export async function fetchInvestigatorState(
+  callFn: (entrypoint: string, calldata: string[]) => Promise<unknown>,
+  identityHex: string,
+): Promise<InvestigatorStateRefresh> {
+  const idFelt = toFeltHex(BigInt(identityHex));
+  const jobs: Array<[string, string[]]> = [
+    ["get_identity_reputation", [idFelt]],
+    ["is_identity_registered", [idFelt]],
+    ["is_identity_slashed", [idFelt]],
+    ["is_identity_eligible", [idFelt]],
+    ["get_identity_stake", [idFelt]],
+    ["get_minimum_reputation", []],
+    ["get_stake_amount", []],
+  ];
+  const raw: Record<string, unknown> = {};
+  const errors: Record<string, string> = {};
+  await Promise.all(
+    jobs.map(async ([fn, args]) => {
+      try {
+        raw[fn] = await callFn(fn, args);
+      } catch (e) {
+        errors[fn] = e instanceof Error ? e.message : String(e);
+      }
+    }),
+  );
+  if (Object.keys(errors).length > 0) return { ok: false, state: null, errors, raw };
+  try {
+    const state: InvestigatorState = {
+      reputation: numView(raw["get_identity_reputation"], "rep", 0),
+      registered: boolView(raw["is_identity_registered"]),
+      slashed: boolView(raw["is_identity_slashed"]),
+      eligible: boolView(raw["is_identity_eligible"]),
+      escrowWei: bigView(raw["get_identity_stake"], "amount"),
+      minRep: numView(raw["get_minimum_reputation"], "min", 60),
+      stakeAmountWei: bigView(raw["get_stake_amount"], "amt"),
+    };
+    return { ok: true, state, errors, raw };
+  } catch (e) {
+    return { ok: false, state: null, errors: { derive: e instanceof Error ? e.message : String(e) }, raw };
+  }
+}
+
 // ---- Private creator identity (same hash-chain scheme, own namespace) -----
 // Creator control auth per bounty; no reputation attached. Stored per bounty
 // (`verity_creator_<id>`): { seed, alias, nextK }. The alias (genesis tip) is

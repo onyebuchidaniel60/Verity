@@ -15,7 +15,7 @@ import {
   genesisTip, peekPreimage, consumePreimage, identityShortId, normFelt,
   generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity,
   evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
-  buildUnstakeActions, submitGate,
+  buildUnstakeActions, submitGate, fetchInvestigatorState,
   peekCreatorPreimage, consumeCreatorPreimage, loadCreator, saveCreator,
   type StoredIdentity, type StoredCreator,
 } from "@/lib/identity-pure";
@@ -124,6 +124,9 @@ export default function BountyDetailPage() {
   // legacy bounties or when this device is not the creator).
   const [storedCreator, setStoredCreator] = useState<StoredCreator | null>(null);
   const [identityInfo, setIdentityInfo] = useState<{ identity: string; registered: boolean; reputation: number; minRep: number; escrowWei: bigint; eligible: boolean; slashed: boolean; stakeAmountWei: bigint } | null>(null);
+  // Non-null when the investigator-state refresh itself failed (reads
+  // incomplete) — distinct from "not staked", with a retry action.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reportReason, setReportReason] = useState("");
   const [payoutAddrInput, setPayoutAddrInput] = useState("");
   const [selectedSubmission, setSelectedSubmission] = useState<number | null>(null);
@@ -258,39 +261,41 @@ export default function BountyDetailPage() {
       // Load private investigator identity state (device seed + chain views).
       // The seed never leaves this device; eligibility comes from chain views
       // keyed by the identity commitment (no wallet linkage on-chain).
+      // Single authoritative refresh: each read is isolated and raw values
+      // are logged, so a read failure can never silently masquerade as
+      // "not staked" (commitments only in logs — never seeds/preimages).
       try {
         const local = loadIdentity();
         setStoredIdentity(local);
+        setRefreshError(null);
         if (local) {
           const cId = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
-          const [repRes, regRes, slashedRes, eligRes, escRes, minRes, amtRes]: any = await Promise.all([
-            cId.call("get_identity_reputation", [local.identity]),
-            cId.call("is_identity_registered", [local.identity]),
-            cId.call("is_identity_slashed", [local.identity]),
-            cId.call("is_identity_eligible", [local.identity]),
-            cId.call("get_identity_stake", [local.identity]),
-            cId.call("get_minimum_reputation", []),
-            cId.call("get_stake_amount", []),
-          ]);
-          const toBool = (r: any) => {
-            const v = r?.eligible ?? r?.registered ?? r?.slashed ?? r;
-            return v === true || v === 1 || v === 1n || String(v).toLowerCase() === "true";
-          };
-          setIdentityInfo({
-            identity: local.identity,
-            registered: toBool(regRes),
-            reputation: Number(repRes?.rep ?? repRes ?? 0),
-            minRep: Number(minRes?.min ?? minRes ?? 60),
-            escrowWei: BigInt(escRes?.amount ?? escRes ?? 0),
-            eligible: toBool(eligRes),
-            slashed: toBool(slashedRes),
-            stakeAmountWei: BigInt(amtRes?.amt ?? amtRes ?? 0),
+          console.info("[investigator-state] refresh start", { identity: identityShortId(local.identity), contract: CONTRACTS.bountyManager });
+          const r = await fetchInvestigatorState((fn, args) => cId.call(fn, args), local.identity);
+          let rawSafe: unknown = null;
+          try {
+            rawSafe = JSON.parse(JSON.stringify(r.raw, (_k, v) => typeof v === "bigint" ? `${v}n` : v));
+          } catch { rawSafe = "(unserializable)"; }
+          console.info("[investigator-state] refresh result", {
+            ok: r.ok,
+            errors: r.errors,
+            raw: rawSafe,
+            derived: r.state ? { ...r.state, escrowWei: r.state.escrowWei.toString(), stakeAmountWei: r.state.stakeAmountWei.toString() } : null,
           });
+          if (r.ok && r.state) {
+            setIdentityInfo({ identity: local.identity, ...r.state });
+          } else {
+            setIdentityInfo(null);
+            const failed = Object.keys(r.errors);
+            setRefreshError(failed.length > 0 ? `Couldn't verify stake state (${failed.join(", ")}). The chain may be fine — retry the read.` : "Couldn't derive stake state. Retry the read.");
+          }
         } else {
+          console.info("[investigator-state] no local identity on this device");
           setIdentityInfo(null);
         }
       } catch {
         setIdentityInfo(null);
+        setRefreshError("Couldn't verify stake state (unexpected error). Retry the read.");
       }
       // Eligibility reads (legacy + private) attempted above — chain is the
       // only source of staked-ness. Submit stays disabled until this is set.
@@ -1332,7 +1337,16 @@ export default function BountyDetailPage() {
               )}
             </div>
           ) : !identityInfo ? (
-            <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>Loading eligibility…</p>
+            refreshError ? (
+              <div>
+                <p style={{ fontSize: 13, color: "var(--amber)", margin: "0 0 8px" }}>{refreshError}</p>
+                <button disabled={!!busy} onClick={() => load()} className="btn btn-secondary" style={{ fontSize: 12 }}>
+                  Retry stake-state read
+                </button>
+              </div>
+            ) : (
+              <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>Loading eligibility…</p>
+            )
           ) : identityInfo.slashed ? (
             <div className="alert alert-error" style={{ margin: 0 }}>
               <span>⚠</span>

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Contract } from "starknet";
+import { Contract, constants } from "starknet";
 import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof";
 import { CONTRACTS } from "@/lib/contracts";
 import { createProvider } from "@/lib/starknet";
@@ -14,6 +14,16 @@ import {
 import { STRK20 } from "@/lib/strk20";
 
 const NETWORK = "sepolia" as const;
+
+// Wallet must be on Sepolia: a request built for Sepolia contracts fails
+// wallet-side validation otherwise. Tolerates hex or name forms; proceeds
+// when the wallet does not report a chain (never block on a missing signal).
+function assertSepoliaChain(chainId: string | undefined, where: string) {
+  if (!chainId) return;
+  const hex = constants.StarknetChainId.SN_SEPOLIA;
+  const ok = /sepolia/i.test(chainId) || chainId.toLowerCase() === String(hex).toLowerCase();
+  if (!ok) throw new Error(`Wallet is on ${chainId} (${where}) — switch to Sepolia and retry.`);
+}
 
 export default function CreateBountyPage() {
   const [title, setTitle] = useState("");
@@ -46,7 +56,9 @@ export default function CreateBountyPage() {
       const metadata = title.trim().slice(0, 31) || "Verity Bounty";
       const metadataFelt = "0x" + Buffer.from(metadata).toString("hex").slice(0, 62) || "0x1234";
 
-      const { wallet } = await connectWallet();
+      const { wallet, address: connectedAddress, chainId } = await connectWallet();
+      assertSepoliaChain(chainId, "create");
+      console.info("[create bounty] context", { network: NETWORK, chainId, connectedAddress, bountyManager: CONTRACTS.bountyManager, helper: CONTRACTS.verityAnonymizer });
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
 
       // Normal public invoke (wallet_addInvokeTransaction — NOT the STRK20
@@ -172,7 +184,9 @@ export default function CreateBountyPage() {
       const metadata = title.trim().slice(0, 31) || "Verity Bounty";
       const metadataFelt = "0x" + Buffer.from(metadata).toString("hex").slice(0, 62) || "0x1234";
 
-      const { wallet, address } = await connectWallet();
+      const { wallet, address, chainId } = await connectWallet();
+      assertSepoliaChain(chainId, "private create");
+      console.info("[create private] context", { network: NETWORK, chainId, bountyManager: CONTRACTS.bountyManager, helper: CONTRACTS.verityAnonymizer });
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as any });
       const payout = (payoutAddr.trim() || address).trim();
       if (!payout) throw new Error("No payout address available — connect your wallet.");

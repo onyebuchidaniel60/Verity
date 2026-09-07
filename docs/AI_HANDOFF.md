@@ -2101,3 +2101,70 @@ rejects decimal calldata — `invalid dec string` — same hex discipline.)
 - V3 deployment already complete (§41). Deployer now ~25.98 STRK (live
   re-read; -0.116 for the contract-side create proof). Nothing else to
   deploy; do NOT spend further without a reason.
+
+## 43. CREATE-114 STILL OPEN + STAKE-UI CASE A PROVEN (2026-09-07, Muse Spark)
+
+### 43.1 BUG 2 first: chain PROVES Case A (frontend refresh, not contract)
+
+- Scanned V3 helper `IdentityStaked` + BM `IdentityRegistered` events from
+  block 14704552 → latest: TWO live private stakes (user's):
+  `0x2fd44a...3c4ea8` (block 14707022, tx `0x32f78427...`) and
+  `0x37cc98...54c3e7c` (block 14707170, tx `0x81c23baa...`), each 1 STRK.
+- Read all seven BM getters + helper escrow for BOTH identities via the
+  same provider/ABI the frontend uses: registered=true, rep 60, min 60,
+  slashed=false, **eligible=true**, escrow 1 STRK. Stake flow + contracts
+  fully correct. Case B (chain not staked) ELIMINATED with evidence.
+- Identity linkage consistent: helper passes the `secret` slot (genesis tip)
+  straight into `register_stake_identity`; frontend reads with the same tip.
+  No wallet-address derivation anywhere. Case C unlikely on this path.
+- Therefore the UI gap is refresh/read-side (Case A, possibly with D
+  timing). Note: TWO live stakes also suggests a retry after the first UI
+  non-update — consistent with "success but no UI change".
+
+### 43.2 BUG 2 fix: single authoritative refresh + no silent nulls
+
+- `identity-pure.ts`: new `fetchInvestigatorState(callFn, identityHex)` —
+  the ONE function deriving {registered, reputation, minRep, escrowWei,
+  eligible, slashed, stakeAmountWei}. Each of the 7 reads isolated; ANY
+  single failure → `{ok:false, errors}` instead of the old Promise.all +
+  bare-catch that nulled the whole state on one flaky RPC call.
+- `bounty/[id]/page.tsx`: identity block in `load()` now uses it + logs
+  `[investigator-state] refresh start/result` (commitment short-id + raw
+  views with bigint-safe serialization — NEVER seeds/preimages) and a
+  `no local identity` branch; new `refreshError` state renders an explicit
+  "Couldn't verify stake state (...) — Retry stake-state read" instead of a
+  misleading perpetual "Loading eligibility…". guard() already does
+  waitForTransaction → load(), so post-stake refresh is automatic, no page
+  reload needed. localStorage persistence unchanged (reload recovers).
+- NOT built (documented follow-up): cross-device identity import/recovery;
+  same-transport swap for the other direct-call flows (open/legacy
+  stake/submit/select/... share the starknet-decimal pattern — each needs
+  its turn, deliberately not sprawled here). Funding/STRK20 flows untouched.
+
+### 43.3 BUG 1 status: payload proven schema-valid + contract-proven, still needs the wallet click
+
+- Fixed-code payload (`account.execute`, hex calldata) matches the official
+  FELT schema `^0x(0|[a-fA-F1-9]{1}[a-fA-F0-9]{0,62})$` element-by-element;
+  contract path proven on V3 (§42.2: bounty #1 CREATED, exact 1 STRK).
+- Added this session: Sepolia chain guard (`assertSepoliaChain` — wallet on
+  the wrong chain now fails fast with "switch to Sepolia" instead of a
+  cryptic wallet 114) + `[create bounty] context` log (network, chainId,
+  wallet address, BOTH contract addresses) in public + private create.
+- If 114 persists on the fixed code, the remaining suspects are wallet-side
+  state (wrong chain — now guarded — stale code in the user's browser, or
+  Ready X behavior), NOT calldata: every field is now logged pre-submit.
+  NEED from user: the `[create bounty] context` + `wallet_addInvokeTransaction`
+  console lines from a fresh `pnpm dev:web` on latest main, plus confirmation
+  the dev server reloaded past 28ae222.
+
+### 43.4 Verification this session
+
+- identity 26/26 (20 existing + 6 new: live-V3 fixtures → eligible, false→true
+  flip opens submitGate, flaky-read reported not silent, raw+named shapes,
+  save→load reload round-trip via localStorage stub, tampered identity
+  rejected), bounty 42/42, tsc 0, next build 7/7, snforge 126/126.
+- Live chain evidence: 2 stakes + full getter reads (above); deployer
+  ~25.98 STRK. No contract changes; fundPrivate diff-empty.
+- GENUINELY BLOCKED on: user wallet clicks (create 0.1/1/10 STRK; stake→
+  eligible→submit on V3) + the two console outputs above. Nothing else the
+  agent can advance without signatures.
