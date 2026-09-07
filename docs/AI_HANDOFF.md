@@ -1646,6 +1646,12 @@ lib/identity.regression.test.ts, app/bounty/[id]/page.tsx, package.json}`;
 root `package.json`; `docs/{PRIVATE_INVESTIGATOR.md (new), ARCHITECTURE.md,
 AI_HANDOFF.md}`.
 
+**Checkpoint commit:** `8361a5d` — `feat(verity): private investigator
+staking + reputation via STRK20 commitment identities` (14 files, +2899/−63,
+no secrets/artifacts in staged set). Pushed `ebb6887..8361a5d main → main`;
+`git status -sb` → `## main...origin/main` (in sync); live `git ls-remote`
+returns `8361a5d` (GitHub holds it).
+
 
 
 
