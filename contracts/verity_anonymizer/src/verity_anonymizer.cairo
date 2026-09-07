@@ -1,6 +1,6 @@
 //! VerityAnonymizer — VERITY's STRK20 application boundary (Phase 3 secret-bound funding).
 //!
-//! Responsibilities (SPEC §10, PLAN §9-10, docs/PHASE3_FUNDING_AUDIT.md):
+//! Responsibilities (VERITY_SPEC §10):
 //!   - recognize the configured STRK20 privacy pool (constructor arg)
 //!   - store BountyManager address (set via set_bounty_manager, owner-only)
 //!   - pool-only authorization for privacy_invoke (caller must be pool)

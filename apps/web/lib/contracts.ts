@@ -22,7 +22,7 @@ export const CONTRACTS: VerityContractRegistry = {
 // Sepolia VerityAnonymizer history:
 // - Gate2 3-arg version 0x0149c9333c62d976c8232907536fe29df683d8ffb98fa3278bdf4e9dc84d9c88 (superseded)
 // - Phase3-5 5-arg FUND/RELEASE 0x04b93a8628d6f905854f54bf3f5a1098cc41273b7dc54d56815e4dda62c0ae4b
-//   (structurally broken: unbacked OpenNoteDeposit, helper balance 0 — see docs/PHASE3_FUNDING_AUDIT.md)
+//   (structurally broken: unbacked OpenNoteDeposit, helper balance 0; superseded)
 // - Phase3 secret-bound 6-arg (locks+escrow) 0x07aa84798ca642a90cc8094c1743dbcd5b9606b36bded3d6297cc1ecf49ad4f3,
 //   class 0x77e082e590a4dd6ef5bcb950811e178c82f34d90952b512e7747e1979817722 (superseded by private-staking deploy below)
 // - Private staking + creator alias (6-arg STAKE/SUBMIT/REG_PAYOUT/UNSTAKE/CREATE, 2026-09-07):

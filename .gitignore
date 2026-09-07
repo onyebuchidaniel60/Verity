@@ -29,5 +29,21 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 
+# AI agent files (local-only helpers, never committed to GitHub)
+AGENTS.md
+CLAUDE.md
+.clinerules/
+.cline/
+.cursor/
+.windsurf/
+.opencode/
+CLINE_IMPLEMENTATION_PLAN.md
+docs/AI_HANDOFF.md
+docs/AI HANDOFF — VERITY.md
+docs/VERITY — AI AGENT WORKFLOW.md
+
 # Uncommitted scratch
 VERITY_phase0/scratch/
+
+# Regenerable local probe output (see apps/web/strk20-proof/readonly-probe.cjs)
+probe-result/
