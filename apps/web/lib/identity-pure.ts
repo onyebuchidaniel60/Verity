@@ -89,6 +89,13 @@ export interface StoredIdentity {
   /** Next unrevealed chain index (starts at 63, decrements per use). */
   nextK: number;
   backedUp: boolean;
+  /** False while the staking transaction is still being confirmed: the seed
+   *  is persisted BEFORE the wallet submits so a landed-but-unconfirmed stake
+   *  (wallet promise lost, tab closed, slow prover) is never orphaned. The
+   *  next load() that sees the chain registered flips this to true
+   *  (recovery). Records written before this flag existed are treated as
+   *  confirmed. Only an UNCONFIRMED record may be replaced by a new stake. */
+  confirmed?: boolean;
 }
 
 const IDENTITY_KEY = "verity_identity";
@@ -108,10 +115,20 @@ export function loadIdentity(): StoredIdentity | null {
     if (!Number.isInteger(p?.nextK)) return null;
     // Integrity: identity must be the genesis of the stored seed.
     if (normFelt(p.identity)?.toLowerCase() !== genesisTip(p.seed).toLowerCase()) return null;
-    return { seed: p.seed, identity: p.identity, nextK: p.nextK, backedUp: !!p.backedUp };
+    // Pre-flag records (no `confirmed` field) are confirmed stakes.
+    const confirmed = p?.confirmed === undefined ? true : !!p.confirmed;
+    return { seed: p.seed, identity: p.identity, nextK: p.nextK, backedUp: !!p.backedUp, confirmed };
   } catch {
     return null;
   }
+}
+
+/** Flip a pending identity to confirmed (after wallet acceptance / when a
+ *  later read proves the chain registered it). Returns the updated record. */
+export function markIdentityConfirmed(s: StoredIdentity): StoredIdentity {
+  const next = { ...s, confirmed: true as const };
+  saveIdentity(next);
+  return next;
 }
 
 export function clearIdentity(): void {

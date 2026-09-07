@@ -2168,3 +2168,121 @@ rejects decimal calldata — `invalid dec string` — same hex discipline.)
 - GENUINELY BLOCKED on: user wallet clicks (create 0.1/1/10 STRK; stake→
   eligible→submit on V3) + the two console outputs above. Nothing else the
   agent can advance without signatures.
+
+## 44. TAKEOVER FIX (2026-09-07, Muse Spark) — public-invoke transport for ALL writes + pending-identity recovery
+
+### 44.1 BUG 1 — root cause (verified layer by layer)
+
+1. Contract side ELIMINATED (live RPC, this session): V3 BountyManager
+   `0x04315e84...` serves 62 interface items including
+   `create_bounty(reward_amount:u128, metadata_hash:felt)`; `get_bounty_count`
+   reads `1` (the sncast bounty #1). Address/ABI/chain/amount all valid.
+2. starknet.js mapping PROVEN (mock-wallet capture, this session):
+   `account.execute({contractAddress, entrypoint, calldata})` emits exactly
+   `{type:'wallet_addInvokeTransaction', params:{calls:[{contract_address,
+   entry_point, calldata}]}}`. For the debug input (title "Test bounty",
+   reward 10) the fixed code sends
+   `calldata:["0x8ac7230489e80000","0x5465737420626f756e7479"]` — schema-valid.
+3. Transport defect PROVEN for every OTHER public write: all 15
+   bounty-detail writes (`open/stake-legacy/submit-legacy/select/report/
+   challenge/resolve/creator-privates/set_payout/withdraw/challenge_private/
+   register_payout_lock/setLocks-retry`) still used `Contract.invoke`, and
+   starknet@10.5.0 `CallData.compile` was reproduced locally emitting
+   DECIMAL (`["10000000000000000000","102028857605763499945784441"]`) —
+   the exact shape Ready X rejects with 114 (same gate that broke funding
+   in 3c594dd, user-confirmed). So even with create fixed, the journey
+   (Open, Select winner, ...) could not survive first wallet contact.
+4. Regression answer (what changed since create last worked): the create
+   code path itself (`Contract.invoke` decimal) is UNCHANGED since the
+   working era — the break is the conjunction of (a) Ready X strict
+   `^0x`-hex FELT validation (external; broke fund first, create equally),
+   (b) the V3 redeploy + creator-alias remodel (0faa42e/05ba399: new
+   addresses, 4-arg set_locks, private-create branch), and (c) the 28ae222
+   hex rewrite of create which was never browser-confirmed. No single bad
+   commit; (a)+(b) moved the ground under unchanged call sites.
+5. HONEST RESIDUAL for create-itself: the hex request above SHOULD pass any
+   FELT validation (all addresses 64-char padded, calldata minimal hex).
+   If 114 persists on the new code, the wallet is rejecting something
+   outside this payload (stale browser bundle running pre-28ae222 decimal
+   code is suspect #1) — the new code now makes that PROVABLE in one
+   click: every create logs flow marker
+   `create-hex-v2/account.execute-array` + the exact wallet-level params +
+   per-item calldata. Absence of the marker = stale bundle, not a payload
+   bug. Env address overrides are now trimmed + validated pre-submit
+   (a malformed NEXT_PUBLIC_* override was suspect #2).
+
+### 44.2 BUG 1 — fix (frontend only; funding/STRK20 paths byte-identical)
+
+- `lib/bounty-pure.ts`: `boolToFelt`, `normalizeContractAddress`
+  (trim+0x-hex+range, preserves deployment string), `InvokeCall`,
+  `toWalletInvokeParams` (byte-mirror of WalletAccountV5/V6.execute
+  mapping for 1:1 logging), `buildInvokeCall` (felt-ish+bool args to
+  validated hex, throws naming arg index).
+- `app/create/page.tsx`: create + set_locks + private set_payout/set_locks
+  all via `buildInvokeCall` + `account.execute([call])` (explicit array);
+  logs flow version + exact params + calldata items; preimages redacted.
+- `app/bounty/[id]/page.tsx`: new `publicInvoke()` helper; all 15 public
+  writes converted (bools via boolToFelt, u64 ids/amounts via hexFelt,
+  preimage redacted in logs); removed dead CREATOR_ABI const. Reads
+  (`Contract.call`) untouched. `fundPrivate/claim/stakePrivate/
+  submitPrivate/registerPayoutPrivate/unstakePrivate/refund` untouched.
+
+### 44.3 BUG 2 — root cause
+
+- Chain side ELIMINATED again (live RPC, this session): all 7 identity
+  getters callable with the frontend IDENTITY_ABI; starknet.js returns
+  named objects (`{rep:60n}`, `{registered:true}`, ...) which
+  `fetchInvestigatorState` parses correctly (unit fixtures match).
+- Failure class that fits ALL observations (works-tx + 2 live stakes +
+  persistently blocked UI): the staking seed never reached durable storage
+  on the checking device — wallet promise lost after landing (slow prover),
+  tab closed mid-prove, or a different device — while the escrow landed
+  on-chain. Old code saved the seed ONLY after wallet acceptance, so a
+  landed-but-unconfirmed stake orphaned the escrow AND the UI kept offering
+  "Stake privately" (second stake → the observed duplicate). A read failure
+  additionally rendered as "Private stake required" (misleading).
+- The "refresh-then-stuck" race from the report is also closed: single
+  `load()` still, but pending identities now poll bounded (4x4s) and any
+  read failure surfaces as a read failure with retry (never as not-staked).
+
+### 44.4 BUG 2 — fix (frontend only; contracts/STRK20 untouched)
+
+- `lib/identity-pure.ts`: `StoredIdentity.confirmed?: boolean`
+  (pre-flag records load as confirmed — backward compatible);
+  `markIdentityConfirmed()`.
+- `stakePrivate`: replaces only UNCONFIRMED records (confirmed still
+  throws); persists pending seed BEFORE the wallet submits; confirms on
+  acceptance; KEEPS the pending seed on wallet error for chain recovery.
+- `load()`: pending + chain-registered -> confirmed (recovery, logged);
+  pending + unregistered -> bounded poll (4x4s) before settling.
+- Eligibility card: pending panel (waiting/Check again/Discard pending via
+  new `discardPending`); submit section: read-failure panel (error + retry)
+  distinct from not-staked CTA.
+- `[submit-gate]` console line on every state change: identityAvailable,
+  identity short-id, confirmed, stateAvailable, eligible, loading, error,
+  gate, reason. `consumePreimage` call sites now sync `storedIdentity`
+  state (submit/register/unstake/challenge-private).
+
+### 44.5 Verification (this session)
+
+- `node --test bounty+identity`: **76/76 pass** (was 68; +6 transport, +2 pending-identity).
+- `tsc --noEmit`: **exit 0**. `next build`: **7/7 routes**.
+- Mock-wallet captures: create debug payload exact;
+  open/select/resolve(bool)/report/stake all emit valid hex wallet params.
+- Live RPC: V3 ABI verified; identity getter shapes verified against parser.
+- Contracts untouched (no scarb/snforge re-run needed; last 126/126 stands).
+- Private funding flow: diff-verified untouched (only imports line grew).
+- Real browser/wallet confirmation STILL REQUIRED (agent cannot sign):
+  1. `pnpm dev:web`, hard-refresh, Create (10 STRK) — expect flow marker +
+     params in console, Ready X opens, bounty CREATED with exact reward.
+  2. Stake privately on an OPEN bounty — expect pending panel, then auto
+     eligible (no reload), `[submit-gate] gate:eligible`.
+  3. Submit investigation privately as Anonymous.
+
+### 44.6 Deployed addresses (unchanged V3)
+
+- BountyManager `0x04315e84d96b7d0e4daf4d0ee0382d3951a4963a85d6b7572520cb4155135807`
+- VerityAnonymizer `0x03602dc4f3a8bd209d47fca442c87f22151536e6ed7387b7025e92c4ebcf9682`
+- STRK `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`
+- STRK20 pool `0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91`
+- Commit for this checkpoint: (recorded after push below).

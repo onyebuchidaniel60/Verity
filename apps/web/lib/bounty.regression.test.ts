@@ -32,6 +32,10 @@ import {
   computeLock,
   hexFelt,
   buildCreateBountyCalldata,
+  normalizeContractAddress,
+  buildInvokeCall,
+  toWalletInvokeParams,
+  boolToFelt,
 } from "./bounty-pure.ts";
 
 describe("Bug 1 — exact reward conversion (BigInt, never Number/1e18)", () => {
@@ -327,5 +331,58 @@ describe("Create bounty wallet payload (INVALID_REQUEST_PAYLOAD regression)", ()
     assert.throws(() => hexFelt(2n ** 251n + 17n * 2n ** 192n + 1n), /felt range/);
     assert.throws(() => hexFelt("-1"), /felt range/);
     assert.throws(() => buildCreateBountyCalldata("not-a-number", "0x1234"));
+  });
+});
+
+describe("Public-invoke transport (wallet_addInvokeTransaction)", () => {
+  // starknet.js Contract.invoke emits DECIMAL calldata which Ready X rejects
+  // with INVALID_REQUEST_PAYLOAD (114). Every public write must go through
+  // buildInvokeCall + account.execute([call]).
+  const BM = "0x04315e84d96b7d0e4daf4d0ee0382d3951a4963a85d6b7572520cb4155135807";
+  const FELT_RE = /^0x[0-9a-fA-F]+$/;
+
+  it("boolToFelt maps Cairo bools to 0x1/0x0", () => {
+    assert.equal(boolToFelt(true), "0x1");
+    assert.equal(boolToFelt(false), "0x0");
+  });
+
+  it("normalizeContractAddress trims env overrides and validates", () => {
+    assert.equal(normalizeContractAddress(`  ${BM}\n`, "BountyManager"), BM.toLowerCase());
+    assert.throws(() => normalizeContractAddress("not-an-address", "BountyManager"), /invalid contract address/);
+    assert.throws(() => normalizeContractAddress("0x0", "BountyManager"), /range/);
+    assert.throws(() => normalizeContractAddress(undefined, "BountyManager"), /invalid contract address/);
+  });
+
+  it("buildInvokeCall normalizes u64/bool/felt args to hex felts", () => {
+    const call = buildInvokeCall(BM, "resolve_report", [1, 2, true]);
+    assert.deepEqual(call, { contractAddress: BM, entrypoint: "resolve_report", calldata: ["0x1", "0x2", "0x1"] });
+    const call2 = buildInvokeCall(BM, "submit_investigation", [3, "0x6576"]);
+    assert.deepEqual(call2.calldata, ["0x3", "0x6576"]);
+    const empty = buildInvokeCall(BM, "stake", []);
+    assert.deepEqual(empty.calldata, []);
+  });
+
+  it("buildInvokeCall throws naming the offending arg index", () => {
+    assert.throws(() => buildInvokeCall(BM, "open_bounty", ["garbage!!"]), /arg\[0\]/);
+    assert.throws(() => buildInvokeCall(BM, "", [1]), /entrypoint/);
+  });
+
+  it("toWalletInvokeParams mirrors WalletAccount.execute mapping exactly", () => {
+    const call = buildInvokeCall(BM, "create_bounty", ["0x8ac7230489e80000", "0x5465737420626f756e7479"]);
+    const params = toWalletInvokeParams(call);
+    assert.equal(params.calls.length, 1);
+    assert.equal(params.calls[0].contract_address, BM);
+    assert.equal(params.calls[0].entry_point, "create_bounty");
+    assert.deepEqual(params.calls[0].calldata, ["0x8ac7230489e80000", "0x5465737420626f756e7479"]);
+    for (const el of params.calls[0].calldata) assert.match(el, FELT_RE);
+  });
+
+  it("Test-bounty debug input produces the exact browser payload", () => {
+    // Title "Test bounty", reward 10: the mandatory-debug-case from the report.
+    const metadataFelt = "0x" + Buffer.from("Test bounty").toString("hex");
+    const [rewardHex, metaHex] = buildCreateBountyCalldata(humanToWei("10"), metadataFelt);
+    const call = buildInvokeCall(BM, "create_bounty", [rewardHex, metaHex]);
+    const params = toWalletInvokeParams(call);
+    assert.deepEqual(params.calls[0].calldata, ["0x8ac7230489e80000", "0x5465737420626f756e7479"]);
   });
 });

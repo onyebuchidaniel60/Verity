@@ -81,6 +81,79 @@ export function hexFelt(v: bigint | string | number): string {
   return "0x" + n.toString(16);
 }
 
+/** "0x1" / "0x0" for Cairo bools in wallet calldata (never true/false). */
+export function boolToFelt(b: boolean): string {
+  return b ? "0x1" : "0x0";
+}
+
+/** Normalize + validate a contract address override (env-provided values can
+ *  carry whitespace or malformed text that the wallet rejects with
+ *  INVALID_REQUEST_PAYLOAD). Trims, requires 0x-hex, felt range, non-zero.
+ *  Returns the trimmed address unchanged (leading zeros preserved) so logs
+ *  stay comparable with deployment records. */
+export function normalizeContractAddress(addr: unknown, label: string): string {
+  const s = String(addr ?? "").trim();
+  if (!HEX_FELT_RE.test(s)) throw new Error(`${label}: invalid contract address ${JSON.stringify(s)} (expected 0x-hex felt)`);
+  const n = BigInt(s);
+  if (n <= 0n || n >= STARK_PRIME) throw new Error(`${label}: contract address out of felt range`);
+  return s;
+}
+
+// ---- Public-invoke transport (wallet_addInvokeTransaction) ----------------
+// starknet.js Contract.invoke compiles calldata to DECIMAL strings, which
+// Ready X rejects with INVALID_REQUEST_PAYLOAD (code 114). Every public
+// (non-STRK20) write must therefore go through buildInvokeCall +
+// account.execute([call]): BigInt-exact 0x-hex felts, validated before the
+// wallet ever sees them. Reads (Contract.call) are unaffected.
+
+/** starknet.js-shaped call: { contractAddress, entrypoint, calldata }. */
+export interface InvokeCall {
+  contractAddress: string;
+  entrypoint: string;
+  calldata: string[];
+}
+
+/** Wallet-shaped params preview: { calls: [{ contract_address,
+ *  entry_point, calldata }] } — byte-identical to what WalletAccountV5/V6
+ *  .execute sends to wallet_addInvokeTransaction (see starknet@10.5.0
+ *  WalletAccount execute: [].concat(calls) map contractAddress->contract_address,
+ *  entrypoint->entry_point, calldata passthrough). Used for exact pre-submit
+ *  logging so the browser request can be compared 1:1 against this schema. */
+export function toWalletInvokeParams(call: InvokeCall): {
+  calls: Array<{ contract_address: string; entry_point: string; calldata: string[] }>;
+} {
+  return {
+    calls: [{
+      contract_address: call.contractAddress,
+      entry_point: call.entrypoint,
+      calldata: [...call.calldata],
+    }],
+  };
+}
+
+/** Build a pre-validated public-invoke call. Accepts felt-ish values
+ *  (decimal/hex/bigint/number) plus booleans for Cairo bools; every element
+ *  is normalized to minimal 0x-hex and range-checked. Throws a precise error
+ *  naming the offending index BEFORE anything reaches the wallet. */
+export function buildInvokeCall(
+  contractAddress: string,
+  entrypoint: string,
+  args: Array<bigint | string | number | boolean>,
+): InvokeCall {
+  if (!entrypoint || !entrypoint.trim()) throw new Error("buildInvokeCall: empty entrypoint");
+  const calldata = args.map((a, i) => {
+    try {
+      return typeof a === "boolean" ? boolToFelt(a) : hexFelt(a as bigint | string | number);
+    } catch (e: any) {
+      throw new Error(`buildInvokeCall(${entrypoint}): arg[${i}] invalid (${e instanceof Error ? e.message : String(e)})`);
+    }
+  });
+  for (const el of calldata) {
+    if (!HEX_FELT_RE.test(el)) throw new Error(`buildInvokeCall(${entrypoint}): invalid wallet calldata felt: ${el}`);
+  }
+  return { contractAddress, entrypoint: entrypoint.trim(), calldata };
+}
+
 /** Hex calldata for BountyManager.create_bounty(reward u128, metadata felt).
  *  starknet.js CallData.compile emits DECIMAL strings, which Ready X rejects
  *  with INVALID_REQUEST_PAYLOAD — so the create flow bypasses Contract.invoke

@@ -9,11 +9,11 @@ import { createProvider, VERITY_NETWORKS } from "@/lib/starknet";
 import { CONTRACTS } from "@/lib/contracts";
 import { STRK20 } from "@/lib/strk20";
 import { useWalletStore } from "@/store/wallet";
-import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus, statusMeta, toHexAddress, getSubmissionStatusName, generateSecret, computeLock, saveBountySecrets, getBountySecrets, savePayoutSecret, getPayoutSecret } from "@/lib/bounty";
+import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus, statusMeta, toHexAddress, getSubmissionStatusName, generateSecret, computeLock, saveBountySecrets, getBountySecrets, savePayoutSecret, getPayoutSecret, normalizeContractAddress, buildInvokeCall, toWalletInvokeParams } from "@/lib/bounty";
 import {
   OP_STAKE, OP_SUBMIT, OP_REG_PAYOUT, OP_UNSTAKE,
   genesisTip, peekPreimage, consumePreimage, identityShortId, normFelt,
-  generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity,
+  generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity, markIdentityConfirmed,
   evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
   buildUnstakeActions, submitGate, fetchInvestigatorState,
   peekCreatorPreimage, consumeCreatorPreimage, loadCreator, saveCreator,
@@ -41,14 +41,9 @@ const IDENTITY_ABI = [
   { name: "challenge_private_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
 ] as const;
 
-// Private creator control entries (alias bounties only; preimage auth).
-const CREATOR_ABI = [
-  { name: "set_payout_address", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout", type: "core::starknet::contract_address::ContractAddress" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
-  { name: "open_bounty_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
-  { name: "select_winner_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
-  { name: "report_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "reason", type: "core::felt252" }, { name: "evidence", type: "core::felt252" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
-  { name: "resolve_report_private", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "should_slash", type: "core::bool" }, { name: "preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
-] as const;
+// Public writes go through publicInvoke() (hex calldata via account.execute);
+// the invoke entries below were removed with that migration. Reads keep
+// their ABIs (Contract.call is unaffected).
 const LOCKS_ABI = [
   { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }, { name: "creator_preimage", type: "core::felt252" }], outputs: [], stateMutability: "external" },
   { name: "register_payout_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
@@ -137,6 +132,28 @@ export default function BountyDetailPage() {
   const setWalletConnection = useWalletStore((s) => s.setConnection);
 
   const provider = createProvider(NETWORK);
+  // Public writes (wallet_addInvokeTransaction) MUST use pre-built 0x-hex
+  // calldata via account.execute: starknet.js Contract.invoke compiles to
+  // DECIMAL strings, which Ready X rejects with INVALID_REQUEST_PAYLOAD
+  // (code 114). Reads keep using Contract.call (unaffected). The trailing
+  // preimage arg of creator-authorized entries is redacted in logs.
+  async function publicInvoke(
+    account: any,
+    contractAddress: string | undefined,
+    entrypoint: string,
+    args: Array<bigint | string | number | boolean>,
+    logTag: string,
+    redactLastArg = false,
+  ): Promise<string> {
+    const to = normalizeContractAddress(contractAddress, `${logTag} target`);
+    const call = buildInvokeCall(to, entrypoint, args);
+    const logged = redactLastArg && call.calldata.length > 0
+      ? { ...call, calldata: call.calldata.map((c, i) => (i === call.calldata.length - 1 ? "<preimage-redacted>" : c)) }
+      : call;
+    console.info(`[${logTag}] wallet_addInvokeTransaction params`, JSON.parse(JSON.stringify(toWalletInvokeParams(logged))));
+    const res: any = await account.execute([call]);
+    return res.transaction_hash ?? res.hash;
+  }
   // Use full ABI for V2 (bounty_manager::types::Bounty) — minimal "Bounty" fails for V2 (returns only id)
   const fallbackBountyAbi = [
     { name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ type: "bounty_manager::types::Bounty" }], stateMutability: "view" },
@@ -270,8 +287,38 @@ export default function BountyDetailPage() {
         setRefreshError(null);
         if (local) {
           const cId = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
-          console.info("[investigator-state] refresh start", { identity: identityShortId(local.identity), contract: CONTRACTS.bountyManager });
-          const r = await fetchInvestigatorState((fn, args) => cId.call(fn, args), local.identity);
+          console.info("[investigator-state] refresh start", { identity: identityShortId(local.identity), contract: CONTRACTS.bountyManager, confirmed: local.confirmed !== false });
+          let r = await fetchInvestigatorState((fn, args) => cId.call(fn, args), local.identity);
+          // Recovery: a pending identity whose stake has since landed is
+          // confirmed here (never orphaned, never force-restaked).
+          if (r.ok && r.state && r.state.registered && local.confirmed === false) {
+            const confirmedRec = markIdentityConfirmed(local);
+            setStoredIdentity(confirmedRec);
+            console.info("[investigator-state] pending identity recovered from chain", { identity: identityShortId(local.identity) });
+          }
+          // Slow-confirmation poll: right after staking, L2 indexing can lag
+          // guard()'s wait. Only for pending + still-unregistered identities,
+          // bounded (4 x 4s) so a genuinely failed stake still settles.
+          if (r.ok && r.state && !r.state.registered && local.confirmed === false) {
+            for (let attempt = 1; attempt <= 4; attempt++) {
+              await new Promise((res) => setTimeout(res, 4000));
+              try {
+                const rp = await fetchInvestigatorState((fn, args) => cId.call(fn, args), local.identity);
+                if (rp.ok && rp.state) {
+                  r = rp;
+                  if (rp.state.registered) {
+                    const confirmedRec = markIdentityConfirmed(local);
+                    setStoredIdentity(confirmedRec);
+                    console.info("[investigator-state] pending identity confirmed on poll", { identity: identityShortId(local.identity), attempt });
+                    break;
+                  }
+                }
+              } catch (e) {
+                console.warn("[investigator-state] confirmation poll warning", attempt, e instanceof Error ? e.message : String(e));
+                break;
+              }
+            }
+          }
           let rawSafe: unknown = null;
           try {
             rawSafe = JSON.parse(JSON.stringify(r.raw, (_k, v) => typeof v === "bigint" ? `${v}n` : v));
@@ -390,6 +437,26 @@ export default function BountyDetailPage() {
     } catch {}
   }, [bounty, connectedAddr, walletStoreAddr, id]);
 
+  // Submit-gate state log: proves which booleans drive the Submit button
+  // (identity present? chain state present? eligible? why blocked?).
+  useEffect(() => {
+    try {
+      const legacyOk = stakeInfo ? (stakeInfo.hasStake && !stakeInfo.isSlashed && stakeInfo.reputation >= stakeInfo.minRep) : false;
+      const g = submitGate({ loaded: eligibilityLoaded, privateEligible: identityInfo?.eligible ?? false, legacyEligible: legacyOk });
+      console.info("[submit-gate]", {
+        identityAvailable: !!storedIdentity,
+        identity: storedIdentity ? identityShortId(storedIdentity.identity) : null,
+        identityConfirmed: storedIdentity ? storedIdentity.confirmed !== false : null,
+        stateAvailable: !!identityInfo,
+        eligible: identityInfo?.eligible ?? false,
+        loading: !eligibilityLoaded,
+        error: refreshError,
+        gate: g,
+        reason: !eligibilityLoaded ? "reads-pending" : g === "eligible" ? null : refreshError ? "read-failed" : !storedIdentity ? "no-identity" : "not-eligible",
+      });
+    } catch {}
+  }, [eligibilityLoaded, identityInfo, storedIdentity, stakeInfo, refreshError, id]);
+
   async function guard(key: string, fn: () => Promise<string | void>) {
     setBusy(key);
     setError(null);
@@ -505,10 +572,9 @@ export default function BountyDetailPage() {
         if (!cc) throw new Error("Creator identity not found on this device — set locks from the device that created this bounty.");
         creatorPreimage = peekCreatorPreimage(cc);
       }
-      const c = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
-      const res: any = await c.invoke("set_locks", [id, fundLock, refundLock, creatorPreimage]);
+      const locksHash = await publicInvoke(account, CONTRACTS.verityAnonymizer, "set_locks", [id, fundLock, refundLock, creatorPreimage], "locks", isPrivateBounty);
       saveBountySecrets(Number(id), secrets);
-      return res.transaction_hash ?? res.hash;
+      return locksHash;
     });
 
   const fundPrivate = () =>
@@ -608,9 +674,7 @@ export default function BountyDetailPage() {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "open_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("open_bounty", [id]);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "open_bounty", [id], "open");
     });
 
   const stake = () =>
@@ -618,9 +682,7 @@ export default function BountyDetailPage() {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "stake", type: "function", inputs: [], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("stake", []);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "stake", [], "stake");
     });
 
   const submit = () =>
@@ -648,9 +710,7 @@ export default function BountyDetailPage() {
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
       // Convert evidence string to felt (short string, truncate)
       const evidenceFelt = evidence.trim().slice(0, 31) ? "0x" + Buffer.from(evidence.trim().slice(0, 31)).toString("hex") : "0x1";
-      const c = new Contract({ abi: [{ name: "submit_investigation", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "evidence_hash", type: "core::felt252" }], outputs: [{ name: "submission_id", type: "core::integer::u64" }], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("submit_investigation", [id, evidenceFelt]);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "submit_investigation", [id, evidenceFelt], "submit");
     });
 
   const selectWinner = (submissionId: number) =>
@@ -658,9 +718,7 @@ export default function BountyDetailPage() {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "select_winner", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("select_winner", [id, submissionId]);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "select_winner", [id, submissionId], "select");
     });
 
   const report = (submissionId: number) =>
@@ -671,9 +729,7 @@ export default function BountyDetailPage() {
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
       const reasonFelt = "0x" + Buffer.from(reportReason.trim().slice(0, 31)).toString("hex");
       const evidenceFelt = "0x" + Buffer.from("report-evidence").toString("hex");
-      const c = new Contract({ abi: [{ name: "report_submission", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "reason", type: "core::felt252" }, { name: "evidence", type: "core::felt252" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("report_submission", [id, submissionId, reasonFelt, evidenceFelt]);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "report_submission", [id, submissionId, reasonFelt, evidenceFelt], "report");
     });
 
   const challenge = (submissionId: number) =>
@@ -681,9 +737,7 @@ export default function BountyDetailPage() {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "challenge_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("challenge_report", [id, submissionId]);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "challenge_report", [id, submissionId], "challenge");
     });
 
   const resolve = (submissionId: number, shouldSlash: boolean) =>
@@ -691,9 +745,7 @@ export default function BountyDetailPage() {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "resolve_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }, { name: "should_slash", type: "core::bool" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("resolve_report", [id, submissionId, shouldSlash]);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "resolve_report", [id, submissionId, shouldSlash], "resolve");
     });
 
   // ---- Private creator control (alias bounties only) ----
@@ -713,9 +765,7 @@ export default function BountyDetailPage() {
     await ensureConnected();
     const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
     const preimage = peekCreatorPreimage(cc);
-    const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-    const res: any = await c.invoke(entry, [...args, preimage]);
-    const h = res.transaction_hash ?? res.hash;
+    const h = await publicInvoke(account, CONTRACTS.bountyManager, entry, [...args, preimage], `bounty ${id} ${busyKey}`, true);
     if (h) {
       try {
         await provider.waitForTransaction(h as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
@@ -745,9 +795,7 @@ export default function BountyDetailPage() {
       const reasonFelt = "0x" + Buffer.from(reportReason.trim().slice(0, 31)).toString("hex");
       const evidenceFelt = "0x" + Buffer.from("report-evidence").toString("hex");
       const preimage = peekCreatorPreimage(cc);
-      const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("report_private", [id, submissionId, reasonFelt, evidenceFelt, preimage]);
-      const h = res.transaction_hash ?? res.hash;
+      const h = await publicInvoke(account, CONTRACTS.bountyManager, "report_private", [id, submissionId, reasonFelt, evidenceFelt, preimage], `bounty ${id} report`, true);
       if (h) {
         try {
           await provider.waitForTransaction(h as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
@@ -776,9 +824,7 @@ export default function BountyDetailPage() {
       const challenged = !!(r?.challenged ?? r?.[6]);
       if (challenged) throw new Error("Challenged reports resolve through owner arbitration.");
       const preimage = peekCreatorPreimage(cc);
-      const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("resolve_report_private", [id, submissionId, shouldSlash, preimage]);
-      const h = res.transaction_hash ?? res.hash;
+      const h = await publicInvoke(account, CONTRACTS.bountyManager, "resolve_report_private", [id, submissionId, shouldSlash, preimage], `bounty ${id} resolve`, true);
       if (h) {
         try {
           await provider.waitForTransaction(h as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
@@ -802,9 +848,7 @@ export default function BountyDetailPage() {
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
       // Non-consuming setup auth: the chain does not advance.
       const preimage = peekCreatorPreimage(cc);
-      const c = new Contract({ abi: CREATOR_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("set_payout_address", [id, payout.trim(), preimage]);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "set_payout_address", [id, payout.trim(), preimage], "payout", true);
     });
 
   const withdrawStake = () =>
@@ -812,9 +856,7 @@ export default function BountyDetailPage() {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "withdraw_stake", type: "function", inputs: [], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("withdraw_stake", []);
-      return res.transaction_hash ?? res.hash;
+      return publicInvoke(account, CONTRACTS.bountyManager, "withdraw_stake", [], "withdraw");
     });
 
   // ---- Private investigator identity flows (STRK20-routed) ----
@@ -823,9 +865,28 @@ export default function BountyDetailPage() {
   // single-use preimages — never the wallet address. Challenge is a direct
   // call from any account (preimage knowledge is the auth).
 
+  const discardPending = async () => {
+    setBusy("discardPending");
+    try {
+      clearIdentity();
+      setStoredIdentity(null);
+      setIdentityInfo(null);
+      setRefreshError(null);
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const stakePrivate = () =>
     guard("stakePrivate", async () => {
-      if (loadIdentity()) throw new Error("An investigator identity already exists on this device. Withdraw it first to start over.");
+      // A CONFIRMED identity blocks re-staking (one live stake per device).
+      // An UNCONFIRMED (pending) record is replaced: it belongs to a stake
+      // whose wallet promise never resolved, and keeping it would strand the
+      // user behind a seed that may never land.
+      const existing = loadIdentity();
+      if (existing && existing.confirmed !== false) throw new Error("An investigator identity already exists on this device. Withdraw it first to start over.");
+      if (existing) console.info("[stakePrivate] replacing unconfirmed pending identity", { identity: identityShortId(existing.identity) });
       const address = await ensureConnected();
       const { wallet } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
@@ -848,6 +909,13 @@ export default function BountyDetailPage() {
       }
       const seed = generateIdentitySeed();
       const identity = genesisTip(seed);
+      // Persist the seed BEFORE the wallet submits: if the transaction lands
+      // on-chain but the wallet promise is lost (slow prover, closed tab),
+      // the next load() still recovers this identity from chain state instead
+      // of orphaning the escrow. Confirmed only on wallet acceptance below.
+      const pending: StoredIdentity = { seed, identity, nextK: 63, backedUp: false, confirmed: false };
+      saveIdentity(pending);
+      setStoredIdentity(pending);
       const actionArray = buildStakeActions({
         helper: CONTRACTS.verityAnonymizer!,
         token: STRK20[NETWORK].strkTokenAddress,
@@ -865,14 +933,18 @@ export default function BountyDetailPage() {
       try {
         const res: any = await account.strk20InvokeTransaction(actionArray as any);
         const h = res.transaction_hash ?? res.hash;
-        // Persist ONLY after the wallet accepts (guard waits for L2, then reloads).
-        saveIdentity({ seed, identity, nextK: 63, backedUp: false });
-        setStoredIdentity({ seed, identity, nextK: 63, backedUp: false });
+        // Confirm ONLY after the wallet accepts (guard waits for L2, then
+        // load() polls the chain and derives eligibility — no reload needed).
+        const confirmedRec = markIdentityConfirmed(pending);
+        setStoredIdentity(confirmedRec);
         console.info("[stakePrivate] wallet response", res);
         void address;
         return h;
       } catch (e: any) {
-        console.error("[stakePrivate] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
+        // The pending seed is KEPT: the transaction may still land. load()
+        // recovers it (chain registered → confirmed → eligible) instead of
+        // forcing a duplicate stake. Only an explicit discard clears it.
+        console.error("[stakePrivate] wallet_strk20InvokeTransaction error (pending identity kept for recovery)", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
         throw e;
       }
     });
@@ -901,7 +973,8 @@ export default function BountyDetailPage() {
       try {
         const res: any = await account.strk20InvokeTransaction(actionArray as any);
         const h = res.transaction_hash ?? res.hash;
-        consumePreimage(local); // advance ONLY after wallet acceptance
+        const { next } = consumePreimage(local); // advance ONLY after wallet acceptance
+        setStoredIdentity(next);
         console.info("[submitPrivate] wallet response", res);
         return h;
       } catch (e: any) {
@@ -919,10 +992,10 @@ export default function BountyDetailPage() {
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
       // Direct call from ANY account: preimage knowledge is the authorization.
       const preimage = peekPreimage(local);
-      const c = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("challenge_private_report", [id, submissionId, preimage]);
-      consumePreimage(local);
-      return res.transaction_hash ?? res.hash;
+      const h = await publicInvoke(account, CONTRACTS.bountyManager, "challenge_private_report", [id, submissionId, preimage], "challengePrivate", true);
+      const { next } = consumePreimage(local);
+      setStoredIdentity(next);
+      return h;
     });
 
   const registerPayoutPrivate = () =>
@@ -949,7 +1022,8 @@ export default function BountyDetailPage() {
       try {
         const res: any = await account.strk20InvokeTransaction(actionArray as any);
         const h = res.transaction_hash ?? res.hash;
-        consumePreimage(local);
+        const { next } = consumePreimage(local);
+        setStoredIdentity(next);
         savePayoutSecret(Number(id), secret);
         console.info("[registerPayoutPrivate] wallet response", res);
         return h;
@@ -980,7 +1054,8 @@ export default function BountyDetailPage() {
       try {
         const res: any = await account.strk20InvokeTransaction(actionArray as any);
         const h = res.transaction_hash ?? res.hash;
-        consumePreimage(local);
+        const { next } = consumePreimage(local);
+        setStoredIdentity(next);
         console.info("[unstakePrivate] wallet response", res);
         return h;
       } catch (e: any) {
@@ -1038,10 +1113,9 @@ export default function BountyDetailPage() {
       let secret = getPayoutSecret(Number(id));
       if (!secret) secret = generateSecret();
       const lock = computeLock(secret);
-      const c = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
-      const res: any = await c.invoke("register_payout_lock", [id, lock]);
+      const h = await publicInvoke(account, CONTRACTS.verityAnonymizer, "register_payout_lock", [id, lock], "register");
       savePayoutSecret(Number(id), secret);
-      return res.transaction_hash ?? res.hash;
+      return h;
     });
 
   const claim = () =>
@@ -1337,7 +1411,26 @@ export default function BountyDetailPage() {
               )}
             </div>
           ) : !identityInfo ? (
-            refreshError ? (
+            storedIdentity && storedIdentity.confirmed === false ? (
+              <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
+                <p style={{ margin: 0, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                  Stake submitted — waiting for on-chain confirmation for Anonymous {identityShortId(storedIdentity.identity)}.
+                  This resolves automatically; no refresh needed.
+                </p>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button disabled={!!busy} onClick={() => load()} className="btn btn-secondary" style={{ fontSize: 12 }}>
+                    Check again
+                  </button>
+                  <button disabled={!!busy} onClick={discardPending} className="btn btn-ghost" style={{ fontSize: 12 }}>
+                    Discard pending identity
+                  </button>
+                </div>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>
+                  Discard only if the wallet never submitted (cancelled prompt). If the transaction landed,
+                  this device re-discovers the stake from chain state instead — nothing is lost.
+                </p>
+              </div>
+            ) : refreshError ? (
               <div>
                 <p style={{ fontSize: 13, color: "var(--amber)", margin: "0 0 8px" }}>{refreshError}</p>
                 <button disabled={!!busy} onClick={() => load()} className="btn btn-secondary" style={{ fontSize: 12 }}>
@@ -1523,6 +1616,22 @@ export default function BountyDetailPage() {
                 <button disabled={!!busy} onClick={privateEligible ? submitPrivate : submit} className="btn btn-primary">
                   {busy === "submitPrivate" ? "Submitting privately…" : busy === "submit" ? "Submitting…" : privateEligible ? "Submit investigation privately" : "Submit investigation"}
                 </button>
+              ) : refreshError ? (
+                <>
+                  <div className="alert alert-error" style={{ margin: 0 }}>
+                    <span>⚠</span>
+                    <div>
+                      <strong>Couldn’t verify stake state</strong>
+                      <div style={{ opacity: 0.85, marginTop: 4 }}>{refreshError} The chain may be fine — this is a read failure, not proof you are unstaked.</div>
+                    </div>
+                  </div>
+                  <button disabled={!!busy} onClick={() => load()} className="btn btn-secondary">
+                    Retry stake-state read
+                  </button>
+                  <button disabled className="btn btn-secondary" title="Eligibility reads must succeed before submitting">
+                    Submit Investigation
+                  </button>
+                </>
               ) : (
                 <>
                   <div className="alert alert-warn" style={{ margin: 0 }}>

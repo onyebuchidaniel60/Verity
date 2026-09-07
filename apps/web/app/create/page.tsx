@@ -6,7 +6,7 @@ import { Contract, constants } from "starknet";
 import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof";
 import { CONTRACTS } from "@/lib/contracts";
 import { createProvider } from "@/lib/starknet";
-import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets, buildCreateBountyCalldata, hexFelt } from "@/lib/bounty";
+import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets, buildCreateBountyCalldata, hexFelt, normalizeContractAddress, buildInvokeCall, toWalletInvokeParams } from "@/lib/bounty";
 import {
   genesisTip, peekCreatorPreimage, buildCreateActions, saveCreator,
   generateIdentitySeed,
@@ -14,6 +14,11 @@ import {
 import { STRK20 } from "@/lib/strk20";
 
 const NETWORK = "sepolia" as const;
+
+// Marker logged with every create payload so a stale browser bundle is
+// immediately visible in the console (the INVALID_REQUEST_PAYLOAD fix ships
+// with this marker; its absence proves the browser runs older code).
+const CREATE_FLOW_VERSION = "create-hex-v2/account.execute-array";
 
 // Wallet must be on Sepolia: a request built for Sepolia contracts fails
 // wallet-side validation otherwise. Tolerates hex or name forms; proceeds
@@ -66,10 +71,16 @@ export default function CreateBountyPage() {
       // starknet.js CallData.compile emits DECIMAL strings, which Ready X
       // rejects with INVALID_REQUEST_PAYLOAD, so the hex calldata is
       // pre-built + schema-validated and sent via account.execute directly.
+      // Env-provided addresses are normalized (trim + 0x-hex + range) because
+      // a malformed override fails the same wallet-side validation.
+      const bountyManager = normalizeContractAddress(CONTRACTS.bountyManager, "BountyManager");
       const [rewardHex, metadataHex] = buildCreateBountyCalldata(rewardWei, metadataFelt);
-      const createCall = { contractAddress: CONTRACTS.bountyManager!, entrypoint: "create_bounty", calldata: [rewardHex, metadataHex] };
-      console.info("[create bounty] wallet_addInvokeTransaction", createCall);
-      const res: any = await account.execute(createCall);
+      const createCall = buildInvokeCall(bountyManager, "create_bounty", [rewardHex, metadataHex]);
+      const walletParams = toWalletInvokeParams(createCall);
+      console.info("[create bounty] flow", CREATE_FLOW_VERSION, { method: "wallet_addInvokeTransaction", network: NETWORK, chainId, account: connectedAddress, bountyManager });
+      console.info("[create bounty] wallet_addInvokeTransaction params", JSON.parse(JSON.stringify(walletParams)));
+      console.info("[create bounty] calldata items", createCall.calldata.map((c, i) => ({ index: i, value: c, chars: c.length })));
+      const res: any = await account.execute([createCall]);
       const hash = res.transaction_hash ?? res.hash ?? "";
       // CREATE does NOT fund: wait for actual L2 confirmation, then read the
       // authoritative on-chain bounty ID + reward. Metadata is written only
@@ -127,9 +138,10 @@ export default function CreateBountyPage() {
             const fundLock = computeLock(fundSecret);
             const refundLock = computeLock(refundSecret);
             // Hex calldata (same INVALID_REQUEST_PAYLOAD reason as create).
-            const locksCalldata = [hexFelt(newId), hexFelt(fundLock), hexFelt(refundLock), "0x0"];
-            console.info("[create bounty] wallet_addInvokeTransaction set_locks", { contract_address: CONTRACTS.verityAnonymizer, calldata: locksCalldata });
-            const lres: any = await account.execute({ contractAddress: CONTRACTS.verityAnonymizer!, entrypoint: "set_locks", calldata: locksCalldata });
+            const helper = normalizeContractAddress(CONTRACTS.verityAnonymizer, "VerityAnonymizer");
+            const locksCall = buildInvokeCall(helper, "set_locks", [hexFelt(newId), hexFelt(fundLock), hexFelt(refundLock), "0x0"]);
+            console.info("[create bounty] wallet_addInvokeTransaction set_locks params", JSON.parse(JSON.stringify(toWalletInvokeParams(locksCall))));
+            const lres: any = await account.execute([locksCall]);
             locksHash = lres.transaction_hash ?? lres.hash ?? "";
             if (locksHash) {
               try {
@@ -250,17 +262,20 @@ export default function CreateBountyPage() {
         // Direct invokes use pre-built hex calldata (same INVALID_REQUEST_PAYLOAD
         // reason as public create: starknet.js would emit decimal strings).
         const stored = { seed, alias, nextK: 63 };
-        const payoutCalldata = [hexFelt(newId), hexFelt(payout.trim()), hexFelt(peekCreatorPreimage(stored))];
-        console.info("[create private] wallet_addInvokeTransaction set_payout_address", { contract_address: CONTRACTS.bountyManager, calldata: payoutCalldata });
-        const pres: any = await account.execute({ contractAddress: CONTRACTS.bountyManager!, entrypoint: "set_payout_address", calldata: payoutCalldata });
+        const bmAddr = normalizeContractAddress(CONTRACTS.bountyManager, "BountyManager");
+        const helperAddr = normalizeContractAddress(CONTRACTS.verityAnonymizer, "VerityAnonymizer");
+        const payoutCall = buildInvokeCall(bmAddr, "set_payout_address", [hexFelt(newId), hexFelt(payout.trim()), hexFelt(peekCreatorPreimage(stored))]);
+        console.info("[create private] flow", CREATE_FLOW_VERSION, { method: "wallet_addInvokeTransaction", network: NETWORK, chainId, bountyManager: bmAddr });
+        console.info("[create private] wallet_addInvokeTransaction set_payout_address params", JSON.parse(JSON.stringify(toWalletInvokeParams({ ...payoutCall, calldata: payoutCall.calldata.map((c, i) => (i === 2 ? "<preimage-redacted>" : c)) }))));
+        const pres: any = await account.execute([payoutCall]);
         try {
           await provider.waitForTransaction(pres.transaction_hash ?? pres.hash, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
         } catch {}
         fundSecret = generateSecret();
         refundSecret = generateSecret();
-        const privLocksCalldata = [hexFelt(newId), hexFelt(computeLock(fundSecret)), hexFelt(computeLock(refundSecret)), hexFelt(peekCreatorPreimage(stored))];
-        console.info("[create private] wallet_addInvokeTransaction set_locks", { contract_address: CONTRACTS.verityAnonymizer, calldata: privLocksCalldata });
-        const lres: any = await account.execute({ contractAddress: CONTRACTS.verityAnonymizer!, entrypoint: "set_locks", calldata: privLocksCalldata });
+        const privLocksCall = buildInvokeCall(helperAddr, "set_locks", [hexFelt(newId), hexFelt(computeLock(fundSecret)), hexFelt(computeLock(refundSecret)), hexFelt(peekCreatorPreimage(stored))]);
+        console.info("[create private] wallet_addInvokeTransaction set_locks params", JSON.parse(JSON.stringify(toWalletInvokeParams({ ...privLocksCall, calldata: privLocksCall.calldata.map((c, i) => (i === 3 ? "<preimage-redacted>" : c)) }))));
+        const lres: any = await account.execute([privLocksCall]);
         locksHash = lres.transaction_hash ?? lres.hash ?? "";
         if (locksHash) {
           try {

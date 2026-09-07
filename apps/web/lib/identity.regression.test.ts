@@ -30,6 +30,7 @@ import {
   saveIdentity,
   loadIdentity,
   clearIdentity,
+  markIdentityConfirmed,
   generateIdentitySeed,
 } from "./identity-pure.ts";
 
@@ -311,6 +312,39 @@ describe("investigator-state refresh (stake -> eligible without reload)", () => 
     parsed.identity = "0x1234"; // attacker/corruption edit
     (globalThis as any).localStorage.setItem("verity_identity", JSON.stringify(parsed));
     assert.equal(loadIdentity(), null);
+    clearIdentity();
+  });
+
+  it("pre-flag records (no confirmed field) load as confirmed", () => {
+    clearIdentity();
+    const seed = generateIdentitySeed();
+    const tip = genesisTip(seed);
+    // Old shape without `confirmed` (backward compat for existing stakes).
+    (globalThis as any).localStorage.setItem("verity_identity", JSON.stringify({ seed, identity: tip, nextK: 63, backedUp: false }));
+    const reloaded = loadIdentity();
+    assert.ok(reloaded);
+    assert.equal(reloaded!.confirmed, true);
+    clearIdentity();
+  });
+
+  it("pending identity persists pre-submit and confirms without reseed", () => {
+    clearIdentity();
+    const seed = generateIdentitySeed();
+    const tip = genesisTip(seed);
+    // stakePrivate saves pending BEFORE the wallet submits.
+    saveIdentity({ seed, identity: tip, nextK: 63, backedUp: false, confirmed: false });
+    const pending = loadIdentity(); // models reload while the prover runs
+    assert.ok(pending);
+    assert.equal(pending!.confirmed, false);
+    assert.equal(pending!.identity.toLowerCase(), tip.toLowerCase());
+    // Wallet acceptance (or chain recovery) flips the flag; the seed never changes.
+    const confirmed = markIdentityConfirmed(pending!);
+    assert.equal(confirmed.confirmed, true);
+    assert.equal(confirmed.seed, seed);
+    const reloaded = loadIdentity();
+    assert.ok(reloaded);
+    assert.equal(reloaded!.confirmed, true);
+    assert.equal(reloaded!.seed, seed);
     clearIdentity();
   });
 });
