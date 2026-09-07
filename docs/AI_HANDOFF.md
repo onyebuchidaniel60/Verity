@@ -2461,5 +2461,8 @@ plus any new error and the Voyager hash on success.
 ### 46.6 Deployed addresses / commit
 
 Unchanged V3 (BM `0x04315e84...`, helper `0x03602dc4...`, STRK
-`0x04718f...`, pool `0x0254...`). Commit for this checkpoint: (recorded
-after push below).
+`0x04718f...`, pool `0x0254...`). Commit: `3b866e1`
+(`fix(strk20): prepare-fallback submission for bare invokes + exact
+request logging`). Pushed `d2c45ac..3b866e1 main -> main`; verified
+`main...origin/main` in sync and live `git ls-remote origin main`
+returns `3b866e1`.
