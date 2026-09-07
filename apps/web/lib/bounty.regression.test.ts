@@ -28,6 +28,8 @@ import {
   toHexAddress,
   statusMeta,
   getSubmissionStatusName,
+  generateSecret,
+  computeLock,
 } from "./bounty-pure.ts";
 
 describe("Bug 1 — exact reward conversion (BigInt, never Number/1e18)", () => {
@@ -224,6 +226,38 @@ describe("Reported scenario — wallet A creates, views as A vs B", () => {
     assert.ok(!isCreator(onChainCreator, null));
     const showAwaitingMsg = isCreatedStatus(status) && !!null && !isCreator(onChainCreator, null);
     assert.ok(!showAwaitingMsg); // must show Connect prompt instead
+  });
+});
+
+describe("Phase 3 — funding secrets (Poseidon parity with the helper)", () => {
+  it("generateSecret yields unique nonzero 0x felts below the prime", () => {
+    const prime = 2n ** 251n + 17n * 2n ** 192n + 1n;
+    const a = generateSecret();
+    const b = generateSecret();
+    for (const s of [a, b]) {
+      assert.match(s, /^0x[0-9a-f]+$/);
+      const v = BigInt(s);
+      assert.ok(v > 0n && v < prime);
+    }
+    assert.notEqual(a, b);
+  });
+  it("computeLock matches the Cairo poseidon vectors (and snforge parity)", () => {
+    // Same constants asserted on-chain in test_poseidon_lock_parity_with_starknet_js.
+    assert.equal(
+      BigInt(computeLock("0x1234")).toString(16),
+      "4e87ec1d3eba27ee5d1fb967121d0ae123b09f545e8f7cbd83f874d704659be",
+    );
+    assert.equal(
+      BigInt(computeLock("0xabcdef123456789")).toString(16),
+      "1276cdef3c9cab6498df7022e6f0e304cb1c0823ed3dfc139ac3b7e7d630425",
+    );
+    assert.equal(
+      BigInt(computeLock("0x7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")).toString(16),
+      "2416308baf2f5b8602265616dabf30e7d35c0a804b3c3ca8fecb0c4ae9f0d91",
+    );
+  });
+  it("locks differ per secret (fund vs refund binding)", () => {
+    assert.notEqual(computeLock(generateSecret()), computeLock(generateSecret()));
   });
 });
 

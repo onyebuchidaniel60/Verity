@@ -1,9 +1,12 @@
-// VERITY bounty pure logic — NO chain/wallet imports.
+// VERITY bounty pure logic — chain I/O free (no Contract/RpcProvider imports)
+// so it can be unit-tested with Node's built-in runner (`node --test`)
+// without a bundler. apps/web/lib/bounty.ts re-exports everything here and
+// adds loadBounty/loadBounties.
 //
-// Single source of truth for reward conversion, status parsing, and
-// current-stage permission gating. Dependency-free so it can be unit-tested
-// with Node's built-in runner (`node --test`) without a bundler.
-// apps/web/lib/bounty.ts re-exports everything here and adds chain I/O.
+// NOTE: this module imports only the dependency-free `hash` utilities from
+// starknet (Poseidon + felt math), which Node resolves as a package.
+
+import { hash } from "starknet";
 
 export type BountyStatusName = "Created" | "Funded" | "Open" | "WinnerSelected" | "Claimable" | "Paid" | "Refunded";
 
@@ -255,8 +258,7 @@ export function isCreator(creator: string | null | undefined, connectedAddr: str
   return !!(c && u && c === u && !isZeroAddress(c));
 }
 
-export function getSubmissionStatusName(status: any): string {
-  if (!status && status !== 0) return "Pending";
+export function getSubmissionStatusName(status: any): string {  if (!status && status !== 0) return "Pending";
   if (typeof status === "string" || typeof status === "number" || typeof status === "bigint") {
     const t = String(status).trim().toLowerCase();
     const map: Record<string, string> = {
@@ -289,4 +291,75 @@ export function getSubmissionStatusName(status: any): string {
     }
   }
   return String(status);
+}
+
+// ---- Phase 3 funding secrets (secret-bound FUND/REFUND/RELEASE) ----
+// Secrets are random felts generated client-side at creation. Only their
+// Poseidon locks go on-chain (via set_locks / register_payout_lock).
+// Plaintexts live ONLY in the creator/winner device storage + a one-time UI
+// backup. NEVER log secrets — diagnostics must carry hashes/flags only.
+const STARK_PRIME = 2n ** 251n + 17n * 2n ** 192n + 1n;
+
+export function generateSecret(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let v = BigInt("0x" + Buffer.from(bytes).toString("hex")) % STARK_PRIME;
+  if (v === 0n) v = 1n;
+  return "0x" + v.toString(16);
+}
+
+/** Poseidon lock matching the helper's `poseidon_hash_span([secret])`
+ *  (parity proven by snforge `test_poseidon_lock_parity_with_starknet_js`
+ *  and the lock-vector tests below against the same constants). */
+export function computeLock(secret: string): string {
+  const h = hash.computePoseidonHashOnElements([secret]);
+  return "0x" + BigInt(h).toString(16);
+}
+
+export interface BountySecrets {
+  fund_secret: string;
+  refund_secret: string;
+}
+
+function secretsKey(id: number): string {
+  return `verity_secrets_${id}`;
+}
+
+function payoutSecretKey(id: number): string {
+  return `verity_payout_secret_${id}`;
+}
+
+export function saveBountySecrets(id: number, s: BountySecrets): void {
+  try {
+    localStorage.setItem(secretsKey(id), JSON.stringify(s));
+  } catch {}
+}
+
+export function getBountySecrets(id: number): BountySecrets | null {
+  try {
+    const raw = localStorage.getItem(secretsKey(id));
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (typeof p?.fund_secret === "string" && typeof p?.refund_secret === "string") return p;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function savePayoutSecret(id: number, secret: string): void {
+  try {
+    localStorage.setItem(payoutSecretKey(id), JSON.stringify({ payout_secret: secret }));
+  } catch {}
+}
+
+export function getPayoutSecret(id: number): string | null {
+  try {
+    const raw = localStorage.getItem(payoutSecretKey(id));
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    return typeof p?.payout_secret === "string" ? p.payout_secret : null;
+  } catch {
+    return null;
+  }
 }

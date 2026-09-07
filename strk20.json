@@ -38,6 +38,15 @@
       "deploy_tx": "0x00f7cded0dbdf9bf4bc7d50ff6151489b0b63d88383aeb40c92f959541a27656",
       "network": "sepolia",
       "verified": true
+    },
+    {
+      "name": "VerityAnonymizer V2 (Phase3 secret-bound, 6-arg locks+escrow)",
+      "address": "0x07aa84798ca642a90cc8094c1743dbcd5b9606b36bded3d6297cc1ecf49ad4f3",
+      "class_hash": "0x77e082e590a4dd6ef5bcb950811e178c82f34d90952b512e7747e1979817722",
+      "declare_tx": "0x3162cbdef3d654939638c211de3643039ed49c7abe95ae94452408e84d8dd1c",
+      "deploy_tx": "0x0716582e3a9917ed3d3423397a426ee354ccb66a1c555fe0501693cd76aa44a0",
+      "network": "sepolia",
+      "verified": true
     }
   ],
   "transactions": [
@@ -236,9 +245,27 @@
       "type": "resolve_report V2 #3 (owner slashes, rep 70→50, Slashed)",
       "network": "sepolia",
       "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x3162cbdef3d654939638c211de3643039ed49c7abe95ae94452408e84d8dd1c",
+      "type": "declare VerityAnonymizer V2 (secret-bound, 6-arg)",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x0716582e3a9917ed3d3423397a426ee354ccb66a1c555fe0501693cd76aa44a0",
+      "type": "deploy VerityAnonymizer V2 0x07aa8479...",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
+    },
+    {
+      "hash": "0x06943475320a40c1dc38626a279862d1041b19f98b898c8385e41061ca933305",
+      "type": "set_anonymizer V2 -> VerityAnonymizer V2 0x07aa8479...",
+      "network": "sepolia",
+      "status": "ACCEPTED_ON_L2"
     }
   ],
   "demo_video": "",
   "demo_url": "",
-  "notes": "Sepolia V2 verification: BountyManager V2 0x03643a... (staking 1 STRK, rep 60, V2) + VerityAnonymizer 0x04b93a... + pool 0x0254... Private funding/payout via STRK20 preserved. Creator-controlled, no verifiers. All V2 transactions verifiable at https://sepolia.voyager.online/tx/<hash>. Mainnet pending."
+  "notes": "Sepolia V2 + secret-bound helper: BountyManager V2 0x03643a... (unchanged, staking 1 STRK, rep 60) + VerityAnonymizer V2 0x07aa8479... (locks+escrow, 6-arg) + pool 0x0254... Old helper 0x04b93a... obsolete (balance was 0, nothing migrated). Private funding test with real wallet signing still pending (see docs/AI_HANDOFF.md). Mainnet pending."
 }

@@ -1408,6 +1408,45 @@ Sepolia deploy + wiring. BM untouched. No staking/identity work.
 - Existing `anonymizer_test.cairo` uses the 5-arg `privacy_invoke` — will be
   mechanically updated to 6 args (new deployment anyway).
 
+## 34. PHASE 3 PRE-DEPLOY CHECKS (2026-09-07, Muse Spark)
+- Contract checkpoint `db67fcc` pushed (52 snforge pass). Poseidon parity
+  proven both sides (snforge constants + node vectors, same 3 values).
+- Old helper `0x04b93a…` live STRK balance re-read: **0** — nothing migrates.
+- Deployer `ready-sepolia` (`0xdc46…`) balance: **~36.7 STRK** — covers
+  declare + deploy + `set_anonymizer`.
+- About to: declare new helper → deploy `(pool 0x0254…, BM 0x03643a…,
+  owner ready, strk 0→STRK)` → verify reads → `BM.set_anonymizer(new)` as
+  owner → update frontend `CONTRACTS` + `strk20.json`. BM untouched.
+
+## 35. PHASE 3 IMPLEMENTATION COMPLETE (code+deploy; wallet funding = user step)
+
+**Contracts:** helper rewritten (locks/escrow, 6-arg invoke, exact approve,
+`strk_token` ctor arg) — checkpoint `db67fcc` (52 snforge pass, incl.
+Poseidon parity + MockBM/MockStrk matrix + BM shape test). Plus one later
+strictness assert (refund amount == escrow).
+
+**Deployed (all ACCEPTED_ON_L2 + SUCCEEDED):**
+- declare class `0x77e082e5…7722`, tx `0x3162cbde…`
+- deploy helper `0x07aa8479…f49ad4f3`, tx `0x0716582e…` — reads verified:
+  pool 0x0254…, BM 0x03643a…, version `VERITY_ANONYMIZER_V2`, token real STRK
+- `BM.set_anonymizer(new)`, tx `0x06943475…`, `BM.get_anonymizer` matches.
+- Old helper `0x04b93a…` obsolete (balance was 0). BM untouched (#1–#10 persist).
+
+**Frontend:** secrets at creation (one-time backup UI, device storage, never
+logged) → `set_locks` → fund `[withdraw→helper, invoke FUND+secret]` →
+refund `[invoke REFUND+secret]` → claim two-stage (register lock, then
+`[transfer OPEN, invoke RELEASE+secret]`); locks/escrow views drive UI incl.
+existing CREATED bounties (set-locks-first panel). Old OPEN-note funding path
+removed. Reward BigInt handling intact.
+
+**Verification:** snforge 52 pass; node 34 pass (incl. lock vectors =
+snforge constants); tsc 0; build 7/7. Secret scan: no plaintext secrets in
+diff (test placeholders only).
+
+**NOT done (requires browser wallet signing — agent cannot):** the 14-step
+Sepolia funding run (create→locks→FUND→FUNDED→reload→OPEN, second-wallet
+rejection). Gate checkboxes for those remain PENDING; see §19 template.
+
 
 
 

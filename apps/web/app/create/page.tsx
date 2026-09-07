@@ -6,17 +6,24 @@ import { Contract } from "starknet";
 import { connectWallet, createStrk20Account } from "@/strk20-proof/strk20-proof";
 import { CONTRACTS } from "@/lib/contracts";
 import { createProvider } from "@/lib/starknet";
-import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty } from "@/lib/bounty";
+import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets } from "@/lib/bounty";
 
 const NETWORK = "sepolia" as const;
+
+// Helper set_locks ABI (direct creator call on VerityAnonymizer).
+const SET_LOCKS_ABI = [
+  { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+] as const;
 
 export default function CreateBountyPage() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [reward, setReward] = useState("1");
   const [busy, setBusy] = useState(false);
+  const [busyStep, setBusyStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ hash: string; id: number | null; rewardWei: string; rewardDisplay: string } | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [success, setSuccess] = useState<{ hash: string; id: number | null; rewardWei: string; rewardDisplay: string; locksHash: string | null; locksError: string | null; fundSecret: string | null; refundSecret: string | null } | null>(null);
 
   // Single source of truth for STRK→wei (BigInt/string-safe, never Number/1e18).
   function humanToWei(s: string): string {
@@ -25,8 +32,10 @@ export default function CreateBountyPage() {
 
   async function handleCreate() {
     setBusy(true);
+    setBusyStep("create");
     setError(null);
     setSuccess(null);
+    setCopied(null);
     try {
       if (!title.trim()) throw new Error("Please add a bounty title");
       if (!reward.trim()) throw new Error("Please set a reward");
@@ -86,9 +95,45 @@ export default function CreateBountyPage() {
               localStorage.setItem("verity_bounty_index", JSON.stringify(idx));
             }
           } catch {}
+          // Phase 3 secret-bound funding: generate fund/refund secrets NOW,
+          // commit ONLY their Poseidon locks on-chain via set_locks (direct
+          // creator call — secrets never leave this device except the one-time
+          // backup below). Plaintexts are persisted locally only after the
+          // lock transaction confirms, keyed by the actual on-chain bounty ID.
+          let locksHash: string | null = null;
+          let locksError: string | null = null;
+          let fundSecret: string | null = null;
+          let refundSecret: string | null = null;
+          try {
+            setBusyStep("locks");
+            fundSecret = generateSecret();
+            refundSecret = generateSecret();
+            const fundLock = computeLock(fundSecret);
+            const refundLock = computeLock(refundSecret);
+            const cLocks = new Contract({ abi: SET_LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
+            const lres: any = await cLocks.invoke("set_locks", [newId, fundLock, refundLock]);
+            locksHash = lres.transaction_hash ?? lres.hash ?? "";
+            if (locksHash) {
+              try {
+                await provider.waitForTransaction(locksHash, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+              } catch (w: any) {
+                console.warn("[create bounty] locks waitForTransaction warning", w?.message);
+              }
+            }
+            saveBountySecrets(newId, { fund_secret: fundSecret, refund_secret: refundSecret });
+          } catch (lErr: any) {
+            // Bounty exists (CREATED) but locks are unset: the detail page
+            // offers "Set funding locks" as a retry. Secrets are NOT stored.
+            locksError = lErr instanceof Error ? lErr.message : String(lErr);
+            console.warn("[create bounty] set_locks failed", lErr);
+            fundSecret = null;
+            refundSecret = null;
+          }
+          setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)), locksHash, locksError, fundSecret, refundSecret });
+          return;
         }
       } catch {}
-      setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)) });
+      setSuccess({ hash, id: newId, rewardWei: onChainRewardWei, rewardDisplay: formatRewardWei(BigInt(onChainRewardWei)), locksHash: null, locksError: null, fundSecret: null, refundSecret: null });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("USER_REFUSED") || msg.includes("user rejected") || msg.includes("UserRejected")) setError("Transaction cancelled — you declined in your wallet. No changes were made.");
@@ -98,6 +143,19 @@ export default function CreateBountyPage() {
       console.error("[create bounty] failed", e);
     } finally {
       setBusy(false);
+      setBusyStep(null);
+    }
+  }
+
+  function copySecret(label: string, value: string) {
+    try {
+      navigator.clipboard.writeText(value).then(
+        () => setCopied(label),
+        () => setCopied(null),
+      );
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      setCopied(null);
     }
   }
 
@@ -117,7 +175,42 @@ export default function CreateBountyPage() {
           <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>Transaction</div>
           <div style={{ fontSize: 12, wordBreak: "break-all", color: "var(--text-secondary)" }}>{success.hash}</div>
           {success.id && <div style={{ marginTop: 8, fontSize: 13 }}>Bounty #{success.id} — Status: CREATED — <Link href={`/bounty/${success.id}`} className="underline" style={{ color: "var(--accent)" }}>Fund it privately →</Link></div>}
+          {success.locksHash && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Funding locks: SET — only this wallet can fund this bounty.</div>}
+          {success.locksError && (
+            <div className="alert alert-error" style={{ marginTop: 8 }}>
+              <span>⚠</span>
+              <div>
+                <strong>Funding locks were not set</strong>
+                <div style={{ opacity: 0.85, marginTop: 4 }}>The bounty exists, but funding is locked until you set the funding locks from the bounty page.</div>
+              </div>
+            </div>
+          )}
         </div>
+        {success.fundSecret && success.refundSecret && (
+          <div className="card card-pad" style={{ textAlign: "left", marginBottom: 16, borderColor: "var(--amber-border)" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Back up your funding secrets — once</div>
+            <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: "0 0 12px", lineHeight: 1.5 }}>
+              These authorize funding and refunds for this bounty. They are stored on this device only.
+              Anyone with the refund secret can trigger a refund to you — keep them private.
+            </p>
+            {(
+              [
+                ["Funding secret", success.fundSecret],
+                ["Refund secret", success.refundSecret],
+              ] as Array<[string, string]>
+            ).map(([label, value]) => (
+              <div key={label} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>{label}</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <code style={{ flex: 1, fontSize: 11, wordBreak: "break-all", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>{value}</code>
+                  <button type="button" className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => copySecret(label, value)}>
+                    {copied === label ? "Copied ✓" : "Copy"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
           <Link href="/bounties" className="btn btn-secondary">
             Browse bounties
@@ -192,7 +285,7 @@ export default function CreateBountyPage() {
         )}
 
         <button disabled={busy} onClick={handleCreate} className="btn btn-primary btn-lg" style={{ width: "100%" }}>
-          {busy ? "Waiting for wallet…" : "Create bounty"}
+          {busy ? (busyStep === "locks" ? "Setting funding locks…" : "Waiting for wallet…") : "Create bounty"}
         </button>
         <p style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", margin: 0 }}>
           Your wallet will open to securely approve this. VERITY never sees your private key.

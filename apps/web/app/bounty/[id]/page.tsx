@@ -9,10 +9,23 @@ import { createProvider, VERITY_NETWORKS } from "@/lib/starknet";
 import { CONTRACTS } from "@/lib/contracts";
 import { STRK20 } from "@/lib/strk20";
 import { useWalletStore } from "@/store/wallet";
-import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus, statusMeta, toHexAddress, getSubmissionStatusName } from "@/lib/bounty";
+import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRewardWei, validateFundingAmount, canSubmitInvestigation, submitBlockMessage, isCreator as isCreatorAddr, isCreatedStatus, isFundedStatus, isOpenStatus, isWinnerSelectedStatus, isClaimableStatus, isPaidStatus, isRefundedStatus, statusMeta, toHexAddress, getSubmissionStatusName, generateSecret, computeLock, saveBountySecrets, getBountySecrets, savePayoutSecret, getPayoutSecret } from "@/lib/bounty";
 
 const NETWORK = "sepolia" as const;
 const POOL = STRK20[NETWORK].poolAddress as Address;
+
+// Phase 3 secret-bound funding: operation felts + helper lock/escrow views.
+const OP_FUND = "0x46554e445f424f554e5459"; // 'FUND_BOUNTY'
+const OP_REFUND = "0x524546554e445f424f554e5459"; // 'REFUND_BOUNTY'
+const OP_RELEASE = "0x52454c45415345"; // 'RELEASE'
+const LOCKS_ABI = [
+  { name: "set_locks", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "fund_lock", type: "core::felt252" }, { name: "refund_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "register_payout_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "payout_lock", type: "core::felt252" }], outputs: [], stateMutability: "external" },
+  { name: "has_fund_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "has", type: "core::bool" }], stateMutability: "view" },
+  { name: "has_refund_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "has", type: "core::bool" }], stateMutability: "view" },
+  { name: "has_payout_lock", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "has", type: "core::bool" }], stateMutability: "view" },
+  { name: "get_escrow", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "amount", type: "core::integer::u128" }], stateMutability: "view" },
+] as const;
 
 // Bounty lifecycle: Created(0) → Funded(1) → Open(2) → WinnerSelected(3) →
 // Claimable(4) → Paid(5) → Refunded(6). The badge is derived STRICTLY from the
@@ -66,6 +79,10 @@ export default function BountyDetailPage() {
   const [submissions, setSubmissions] = useState<any[]>([]);
   const [fundAmount, setFundAmount] = useState("");
   const [fundAmountError, setFundAmountError] = useState<string | null>(null);
+  const [fundSecretPaste, setFundSecretPaste] = useState("");
+  const [refundSecretPaste, setRefundSecretPaste] = useState("");
+  const [payoutSecretPaste, setPayoutSecretPaste] = useState("");
+  const [locksInfo, setLocksInfo] = useState<{ hasFundLock: boolean; hasRefundLock: boolean; hasPayoutLock: boolean; escrowWei: bigint } | null>(null);
   const [connectedAddr, setConnectedAddr] = useState<string | null>(null);
   const [stakeInfo, setStakeInfo] = useState<{ hasStake: boolean; stakeAmount: string; reputation: number; minRep: number; isSlashed: boolean } | null>(null);
   const [reportReason, setReportReason] = useState("");
@@ -195,6 +212,28 @@ export default function BountyDetailPage() {
           setStakeInfo(null);
         }
       }
+      // Load helper funding locks + escrow (public views; drive fund/refund/claim UI).
+      try {
+        const cLocks: any = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: provider });
+        const [hasFund, hasRefund, hasPayout, escrow]: any = await Promise.all([
+          cLocks.call("has_fund_lock", [id]),
+          cLocks.call("has_refund_lock", [id]),
+          cLocks.call("has_payout_lock", [id]),
+          cLocks.call("get_escrow", [id]),
+        ]);
+        const toBool = (r: any) => {
+          const v = r?.has ?? r;
+          return v === true || v === 1 || v === 1n || String(v).toLowerCase() === "true";
+        };
+        setLocksInfo({
+          hasFundLock: toBool(hasFund),
+          hasRefundLock: toBool(hasRefund),
+          hasPayoutLock: toBool(hasPayout),
+          escrowWei: BigInt(escrow?.amount ?? escrow ?? 0),
+        });
+      } catch {
+        setLocksInfo(null);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -305,6 +344,19 @@ export default function BountyDetailPage() {
       else if (msgLower.includes("not_open")) setError("This bounty is not open for submissions right now.");
       else if (msgLower.includes("invalid_request_payload")) setError("We couldn’t prepare the private transaction. Please check the amount and try again.");
       else if (msgLower.includes("amount_mismatch")) setError("Funding amount does not match the bounty reward. Please enter the exact reward amount.");
+      else if (msgLower.includes("no_fund_lock")) setError("Funding locks are not set for this bounty. The creator must set them first (one transaction from the bounty page).");
+      else if (msgLower.includes("no_refund_lock")) setError("Refund lock not found. Set the funding locks first.");
+      else if (msgLower.includes("no_payout_lock")) setError("No payout claim registered yet. The winner must register their payout claim first.");
+      else if (msgLower.includes("bad_secret") || msgLower.includes("secret_zero")) setError("Invalid funding secret. Use the secret backed up at creation, or set new locks (creator, before funding). The bounty remains unchanged.");
+      else if (msgLower.includes("no_fund_secret") || msgLower.includes("no_refund_secret") || msgLower.includes("no_payout_secret")) setError(rawMsg.includes(":") ? rawMsg.slice(rawMsg.indexOf(":") + 1).trim() : "Secret not found on this device. Paste your backup secret to continue.");
+      else if (msgLower.includes("not_winner")) setError("Only the recorded winner can register a payout claim.");
+      else if (msgLower.includes("no_winner")) setError("No winner selected yet.");
+      else if (msgLower.includes("no_escrow")) setError("No escrowed funds for this bounty.");
+      else if (msgLower.includes("not_refundable")) setError("This bounty can no longer be refunded (winner selected, paid, or already refunded).");
+      else if (msgLower.includes("note_must_be_zero")) setError("Invalid funding payload. Please reload and try again.");
+      else if (msgLower.includes("lock_zero") || msgLower.includes("escrow_nonzero")) setError("Funding locks are in an unexpected state. Please reload and try again.");
+      else if (msgLower.includes("transfer_failed")) setError("Refund transfer failed on-chain. Nothing changed — please try again.");
+      else if (msgLower.includes("approve_failed")) setError("Payout approval failed on-chain. Nothing changed — please try again.");
       else if (msgLower.includes("not_created")) setError("This bounty can’t be funded right now — it’s no longer in the created state.");
       else if (msgLower.includes("paymaster") || msgLower.includes("transaction_execution_error") || msgLower.includes("156")) {
         const dataStr = JSON.stringify(e?.data ?? e?.cause ?? "");
@@ -321,6 +373,23 @@ export default function BountyDetailPage() {
     }
   }
 
+  const setLocks = () =>
+    guard("locks", async () => {
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      // Reuse stored secrets when present (rotation otherwise); persist only
+      // after the lock transaction confirms. Secrets never logged.
+      let secrets = getBountySecrets(Number(id));
+      if (!secrets) secrets = { fund_secret: generateSecret(), refund_secret: generateSecret() };
+      const fundLock = computeLock(secrets.fund_secret);
+      const refundLock = computeLock(secrets.refund_secret);
+      const c = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
+      const res: any = await c.invoke("set_locks", [id, fundLock, refundLock]);
+      saveBountySecrets(Number(id), secrets);
+      return res.transaction_hash ?? res.hash;
+    });
+
   const fundPrivate = () =>
     guard("fund", async () => {
       if (!bounty) throw new Error("Bounty not loaded");
@@ -332,6 +401,11 @@ export default function BountyDetailPage() {
       if (!v.ok) { setFundAmountError(v.error || "Funding amount must match the bounty reward."); throw new Error(`AMOUNT_MISMATCH: entered ${v.enteredWei} != reward ${rewardWeiStr}`); }
       const enteredWei = v.enteredWei;
       setFundAmountError(null);
+      // Fund secret: stored at creation (or when locks were set), else pasted backup.
+      // The secret itself is NEVER logged — only its presence.
+      const secret = (fundSecretPaste.trim() || getBountySecrets(Number(id))?.fund_secret || "").trim();
+      if (!secret) throw new Error("NO_FUND_SECRET: funding secret not found on this device. Paste your backup funding secret to continue.");
+      if (!locksInfo?.hasFundLock) throw new Error("NO_FUND_LOCK: funding locks are not set for this bounty yet.");
       const address = await ensureConnected();
       const { wallet } = await connectWallet();
       const cap = await (await import("@/strk20-proof/strk20-proof")).detectStrk20Capability(wallet);
@@ -349,16 +423,19 @@ export default function BountyDetailPage() {
       const amountFelt = "0x" + BigInt(enteredWei).toString(16);
       const bountyIdFelt = "0x" + BigInt(String(bountyId)).toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      const operation = "0x46554e445f424f554e5459";
+      const secretFelt = "0x" + BigInt(secret).toString(16);
+      // Phase 3 secret-bound funding (ONE atomic private transaction):
+      // 1. withdraw exact reward from shielded balance INTO the helper
+      // 2. invoke FUND (no open note, no deposit returned — helper escrows).
       const actionArray = [
-        { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
-        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}"] } as any,
+        { type: "withdraw", token: STRK20[NETWORK].strkTokenAddress as Address, amount: amountFelt, recipient: CONTRACTS.verityAnonymizer! } as any,
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [OP_FUND, bountyIdFelt, amountFelt, nonce, "0x0", secretFelt] } as any,
       ];
-      console.info("[fundPrivate] STRK20 action array", JSON.stringify(actionArray, null, 2));
-      actionArray.forEach((act: any, idx: number) => {
-        if (act.calldata) act.calldata.forEach((c: any, j: number) => console.info(`[fundPrivate] action[${idx}].calldata[${j}]`, { value: c, type: typeof c }));
-      });
-      console.info("[fundPrivate] pool", POOL, "token", STRK20[NETWORK].strkTokenAddress, "bountyId", bountyId, "bountyIdFelt", bountyIdFelt, "amountFelt", amountFelt);
+      console.info("[fundPrivate] STRK20 action array", JSON.stringify([
+        { type: "withdraw", token: STRK20[NETWORK].strkTokenAddress, amount: amountFelt, recipient: CONTRACTS.verityAnonymizer },
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: [OP_FUND, bountyIdFelt, amountFelt, nonce, "0x0", "<secret-redacted>"] },
+      ], null, 2));
+      console.info("[fundPrivate] pool", POOL, "token", STRK20[NETWORK].strkTokenAddress, "helper", CONTRACTS.verityAnonymizer, "bountyId", bountyId, "bountyIdFelt", bountyIdFelt, "amountFelt", amountFelt, "hasSecret", true);
       console.info("[fundPrivate] wallet API versions", cap.walletApiVersions, "supported", cap.supported);
       try {
         const checkContract = new Contract({ abi: [{ name: "get_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [{ name: "bounty", type: "Bounty" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
@@ -389,8 +466,8 @@ export default function BountyDetailPage() {
             pool: POOL,
             targetContract: CONTRACTS.verityAnonymizer,
             actions: [
-              { type: "transfer", amount: "OPEN", noteIndex: 0 },
-              { type: "invoke", operation: "FUND_BOUNTY", calldataLength: 5 },
+              { type: "withdraw", amount: enteredWei },
+              { type: "invoke", operation: "FUND_BOUNTY", calldataLength: 6, hasSecret: true },
             ],
             actionCount: actionArray.length,
           });
@@ -510,11 +587,56 @@ export default function BountyDetailPage() {
 
   const refund = () =>
     guard("refund", async () => {
+      if (!bounty) throw new Error("Bounty not loaded");
+      // Refund secret: stored at creation/lock time, else pasted backup. Never logged.
+      const secret = (refundSecretPaste.trim() || getBountySecrets(Number(id))?.refund_secret || "").trim();
+      if (!secret) throw new Error("NO_REFUND_SECRET: refund secret not found on this device. Paste your backup refund secret to continue.");
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
+      const bountyId = Number(id);
+      const bountyIdFelt = "0x" + BigInt(String(bountyId)).toString(16);
+      // Exact recorded escrow (helper enforces equality; 0 for unfunded cancel).
+      const escrowWei = locksInfo?.escrowWei ?? 0n;
+      const amountFelt = "0x" + escrowWei.toString(16);
+      const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
+      const secretFelt = "0x" + BigInt(secret).toString(16);
+      // Single invoke: escrow returns to the FIXED on-chain creator. No notes.
+      const actionArray = [
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [OP_REFUND, bountyIdFelt, amountFelt, nonce, "0x0", secretFelt] } as any,
+      ];
+      console.info("[refund] diagnostic payload", {
+        walletApiMethod: "wallet_strk20InvokeTransaction",
+        network: NETWORK,
+        bountyId,
+        escrowWei: escrowWei.toString(),
+        hasSecret: true,
+        targetContract: CONTRACTS.verityAnonymizer,
+        actionCount: actionArray.length,
+      });
+      try {
+        const res: any = await account.strk20InvokeTransaction(actionArray);
+        console.info("[refund] wallet response", res);
+        return res.transaction_hash ?? res.hash;
+      } catch (e: any) {
+        console.error("[refund] wallet_strk20InvokeTransaction error", e, "data", JSON.stringify(e?.data ?? e?.cause, null, 2));
+        throw e;
+      }
+    });
+
+  const registerPayout = () =>
+    guard("register", async () => {
       const { wallet } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
-      const c = new Contract({ abi: [{ name: "refund_bounty", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }], outputs: [], stateMutability: "external" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: account });
-      const res: any = await c.invoke("refund_bounty", [id]);
+      // Winner payout secret: reuse stored (rotation allowed pre-release),
+      // persist only after registration confirms. Never logged.
+      let secret = getPayoutSecret(Number(id));
+      if (!secret) secret = generateSecret();
+      const lock = computeLock(secret);
+      const c = new Contract({ abi: LOCKS_ABI as any, address: CONTRACTS.verityAnonymizer!, providerOrAccount: account });
+      const res: any = await c.invoke("register_payout_lock", [id, lock]);
+      savePayoutSecret(Number(id), secret);
       return res.transaction_hash ?? res.hash;
     });
 
@@ -525,20 +647,27 @@ export default function BountyDetailPage() {
       const normConnected = connectedAddr ? normalizeAddr(connectedAddr) : null;
       if (normWinner && normConnected && normWinner !== normConnected) throw new Error("NOT_AUTHORIZED_CLAIM: Only the winner can claim this reward");
       if (!winner || String(winner) === "0x0" || (winner as any) === 0) throw new Error("No winner selected yet");
+      if (!locksInfo?.hasPayoutLock) throw new Error("NO_PAYOUT_LOCK: register your payout claim first (one transaction), then claim privately.");
+      const secret = (payoutSecretPaste.trim() || getPayoutSecret(Number(id)) || "").trim();
+      if (!secret) throw new Error("NO_PAYOUT_SECRET: payout secret not found on this device. Register your payout claim again to rotate it.");
       const { wallet, address } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
       const bountyIdFelt = "0x" + BigInt(bountyId).toString(16);
-      // On-chain reward is authoritative — never a hardcoded fallback.
-      const amountFelt = "0x" + getRewardWei(bounty).toString(16);
+      // Exact recorded escrow fills the winner's open note (helper enforces).
+      const escrowWei = locksInfo?.escrowWei ?? getRewardWei(bounty);
+      const amountFelt = "0x" + escrowWei.toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
-      const operation = "0x52454c45415345";
+      const secretFelt = "0x" + BigInt(secret).toString(16);
       const actionArray = [
         { type: "transfer", token: STRK20[NETWORK].strkTokenAddress as Address, amount: "OPEN", recipient: address } as any,
-        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [operation, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}"] } as any,
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [OP_RELEASE, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}", secretFelt] } as any,
       ];
-      console.info("[claim] STRK20 action array", JSON.stringify(actionArray, null, 2));
+      console.info("[claim] STRK20 action array", JSON.stringify([
+        { type: "transfer", token: STRK20[NETWORK].strkTokenAddress, amount: "OPEN", recipient: address },
+        { type: "invoke", contract: CONTRACTS.verityAnonymizer, calldata: [OP_RELEASE, bountyIdFelt, amountFelt, nonce, "${openNoteIds[0]}", "<secret-redacted>"] },
+      ], null, 2));
       try {
         const res: any = await account.strk20InvokeTransaction(actionArray);
         console.info("[claim] wallet response", res);
@@ -613,6 +742,28 @@ export default function BountyDetailPage() {
   const normWinner = normalizeAddr(winnerAddr);
   const isCreator = isCreatorAddr(creatorAddr, connectedAddr);
   const isWinner = !!(normWinner && normConnected && normWinner === normConnected && normWinner !== "0x0000000000000000000000000000000000000000000000000000000000000000");
+  // Creator device secrets (fund/refund set at creation or lock time; payout
+  // by the winner at claim time). Plaintexts never leave this device except
+  // inside the private-tx calldata that consumes them. Never logged.
+  const storedSecrets = getBountySecrets(Number(id));
+  const storedPayoutSecret = getPayoutSecret(Number(id));
+
+  const secretField = (inputId: string, label: string, value: string, setValue: (v: string) => void, help: string) => (
+    <div>
+      <label className="label" htmlFor={inputId}>{label}</label>
+      <input
+        id={inputId}
+        type="password"
+        className="input"
+        placeholder="Paste backup secret"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      <div className="help">{help}</div>
+    </div>
+  );
 
   const timeline = [
     { key: "Created", done: true, current: isCreated },
@@ -750,7 +901,7 @@ export default function BountyDetailPage() {
       <div className="card card-pad" style={{ marginBottom: 16 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Actions</h3>
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px", lineHeight: 1.5 }}>
-          {isCreated && (isCreator ? "Status: CREATED — waiting for funding. Enter the exact reward amount and fund it privately. The bounty is NOT funded yet." : "Status: CREATED — waiting for the creator to fund this bounty.")}
+          {isCreated && (isCreator ? (locksInfo && !locksInfo.hasFundLock ? "Status: CREATED — set the funding locks first (one transaction), then fund privately." : "Status: CREATED — waiting for funding. Enter the exact reward amount and fund it privately. The bounty is NOT funded yet.") : "Status: CREATED — waiting for the creator to fund this bounty.")}
           {isFunded && (isCreator ? "Status: FUNDED — now open it for investigations. This is a separate step." : "Status: FUNDED — awaiting the creator to open it for investigations.")}
           {isOpen && (isCreator ? "Investigations are coming in. Review them below and select a winner when ready. You can also reclaim funds if no entry deserves the reward." : "Bounty is open. Share your investigation for review below.")}
           {isWinnerSelected && "A winner has been selected. The reward is ready to be released."}
@@ -768,7 +919,20 @@ export default function BountyDetailPage() {
               </button>
             </div>
           )}
-          {isCreated && isCreator && (
+          {isCreated && isCreator && locksInfo && !locksInfo.hasFundLock && (
+            <div style={{ display: "grid", gap: 10, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--amber-border)", borderRadius: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Set funding locks</div>
+              <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
+                Before this bounty can be funded, commit the funding locks (one transaction).
+                This binds funding authorization to your wallet — only you will be able to fund it.
+                New secrets are generated on this device and backed up to you if none exist yet.
+              </p>
+              <button disabled={!!busy} onClick={setLocks} className="btn btn-primary">
+                {busy === "locks" ? "Setting locks…" : "Set funding locks"}
+              </button>
+            </div>
+          )}
+          {isCreated && isCreator && (!locksInfo || locksInfo.hasFundLock) && (
             <div style={{ display: "grid", gap: 10, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>Fund this bounty</div>
               <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Bounty reward: <strong style={{ color: "var(--accent)" }}>{rewardStr}</strong></div>
@@ -795,10 +959,11 @@ export default function BountyDetailPage() {
                 </div>
                 {fundAmountError && <div style={{ fontSize: 12, color: "var(--red)", marginTop: 6 }}>{fundAmountError}</div>}
               </div>
+              {!storedSecrets?.fund_secret && secretField("fund-secret", "Funding secret (backup)", fundSecretPaste, setFundSecretPaste, "Not found on this device — paste the backup funding secret shown at creation.")}
               <button disabled={!!busy} onClick={fundPrivate} className="btn btn-primary">
                 {busy === "fund" ? "Confirm in wallet…" : "Fund privately"}
               </button>
-              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>Your wallet will open only when you click Fund privately. Status becomes FUNDED only after the transaction is confirmed.</p>
+              <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, lineHeight: 1.4 }}>Your shielded balance funds the helper escrow in one atomic private transaction. Status becomes FUNDED only after the transaction is confirmed.</p>
             </div>
           )}
           {isCreated && connectedAddr && !isCreator && (
@@ -808,9 +973,18 @@ export default function BountyDetailPage() {
             </div>
           )}
           {isFunded && isCreator && (
-            <button disabled={!!busy} onClick={open} className="btn btn-primary">
-              {busy === "open" ? "Processing…" : "Open bounty"}
-            </button>
+            <div style={{ display: "grid", gap: 10 }}>
+              <button disabled={!!busy} onClick={open} className="btn btn-primary">
+                {busy === "open" ? "Processing…" : "Open bounty"}
+              </button>
+              <div style={{ display: "grid", gap: 8, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>Reclaim instead (no winner)</div>
+                {!storedSecrets?.refund_secret && secretField("refund-secret-funded", "Refund secret (backup)", refundSecretPaste, setRefundSecretPaste, "Not found on this device — paste the backup refund secret shown at creation.")}
+                <button disabled={!!busy} onClick={refund} className="btn btn-secondary">
+                  {busy === "refund" ? "Reclaiming…" : "No winner — reclaim funds (protocol fee applies)"}
+                </button>
+              </div>
+            </div>
           )}
           {isFunded && !isCreator && connectedAddr && (
             <div className="alert alert-warn" style={{ margin: 0 }}>
@@ -836,6 +1010,7 @@ export default function BountyDetailPage() {
                 <span>◈</span>
                 <div><strong>You created this bounty. You cannot submit an investigation to it.</strong><div style={{ opacity: 0.85, marginTop: 4 }}>Review investigations below and select a winner when ready, or reclaim funds if none deserve the reward.</div></div>
               </div>
+              {!storedSecrets?.refund_secret && secretField("refund-secret-open", "Refund secret (backup)", refundSecretPaste, setRefundSecretPaste, "Not found on this device — paste the backup refund secret shown at creation.")}
               <button disabled={!!busy} onClick={refund} className="btn btn-secondary">
                 {busy === "refund" ? "Reclaiming…" : "No winner — reclaim funds (protocol fee applies)"}
               </button>
@@ -844,9 +1019,25 @@ export default function BountyDetailPage() {
           {(isWinnerSelected || isClaimable) && (
             <>
               {isWinner ? (
-                <button disabled={!!busy} onClick={claim} className="btn btn-primary">
-                  {busy === "claim" ? "Claiming privately…" : "Claim reward privately"}
-                </button>
+                locksInfo && !locksInfo.hasPayoutLock ? (
+                  <div style={{ display: "grid", gap: 8, padding: 16, background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 12 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>Register payout claim</div>
+                    <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
+                      Step 1 of 2: register your payout claim (one transaction). Only the recorded winner can do this.
+                      A payout secret is generated on this device — it authorizes the private release to you and nobody else.
+                    </p>
+                    <button disabled={!!busy} onClick={registerPayout} className="btn btn-primary">
+                      {busy === "register" ? "Registering…" : "Register payout claim"}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {!storedPayoutSecret && secretField("payout-secret", "Payout secret (backup)", payoutSecretPaste, setPayoutSecretPaste, "Not found on this device — register your payout claim again to rotate it, or paste the backup.")}
+                    <button disabled={!!busy} onClick={claim} className="btn btn-primary">
+                      {busy === "claim" ? "Claiming privately…" : "Claim reward privately"}
+                    </button>
+                  </div>
+                )
               ) : isCreator ? (
                 <div className="alert alert-warn" style={{ margin: 0 }}>
                   <span>◈</span>
@@ -863,7 +1054,7 @@ export default function BountyDetailPage() {
           {isPaid && <div className="alert alert-success">✓ Reward released — winner received funds privately.</div>}
           {isRefunded && <div className="alert alert-warn">This bounty was refunded to the creator.</div>}
         </div>
-        {busy && <div style={{ marginTop: 12, fontSize: 12, color: "var(--amber)" }}>Waiting for wallet… {busy === "fund" || busy === "claim" ? "This uses a private proof and may take up to 30 seconds." : "Confirm in your wallet."}</div>}
+        {busy && <div style={{ marginTop: 12, fontSize: 12, color: "var(--amber)" }}>Waiting for wallet… {busy === "fund" || busy === "claim" || busy === "refund" ? "This uses a private proof and may take up to 30 seconds." : "Confirm in your wallet."}</div>}
         {txHash && (
           <div style={{ marginTop: 12, fontSize: 12 }}>
             Transaction:{" "}

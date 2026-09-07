@@ -353,6 +353,9 @@ pub mod VerityAnonymizer {
                     'NOT_REFUNDABLE',
                 );
                 let escrow = self.escrowed.read(bounty_id);
+                // The declared amount must equal the recorded escrow exactly
+                // (0 for an unfunded cancel); the transfer below uses escrow.
+                assert(amount == escrow, 'AMOUNT_MISMATCH');
                 // Authoritative state transition first; reverts for winner/paid/refunded.
                 bm.refund_bounty(bounty_id);
                 if escrow.is_non_zero() {
