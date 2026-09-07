@@ -373,6 +373,28 @@ export default function BountyDetailPage() {
       }
       try {
         console.info("[fundPrivate] calling wallet_strk20InvokeTransaction");
+        // Safe diagnostic payload (public tx data only — no keys/secrets):
+        // bountyId, creator, connected wallet, reward, amount, token, pool,
+        // target contract, action names, network, wallet method, action count.
+        try {
+          console.info("[fundPrivate] diagnostic payload", {
+            walletApiMethod: "wallet_strk20InvokeTransaction",
+            network: NETWORK,
+            bountyId,
+            creatorAddress: String((bounty as any)?.creator ?? ""),
+            connectedAddress: address,
+            bountyRewardWei: rewardWeiStr,
+            fundingAmountWei: enteredWei,
+            token: STRK20[NETWORK].strkTokenAddress,
+            pool: POOL,
+            targetContract: CONTRACTS.verityAnonymizer,
+            actions: [
+              { type: "transfer", amount: "OPEN", noteIndex: 0 },
+              { type: "invoke", operation: "FUND_BOUNTY", calldataLength: 5 },
+            ],
+            actionCount: actionArray.length,
+          });
+        } catch {}
         const res: any = await account.strk20InvokeTransaction(actionArray);
         console.info("[fundPrivate] wallet response", res);
         return res.transaction_hash ?? res.hash;

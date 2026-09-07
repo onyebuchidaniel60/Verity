@@ -1284,6 +1284,77 @@ signing and remain user-verified (see §29.1).
 `apps/web/app/bounty/[id]/page.tsx`,
 `apps/web/lib/bounty.regression.test.ts`, `docs/AI_HANDOFF.md` (this §30).
 
+## 31. FUNDING 156 DIAGNOSIS — contract-side, not paymaster (2026-09-07, Muse Spark)
+
+**Symptom:** Fund privately → Ready X opens → Confirm →
+`PaymasterV2Error 156 TRANSACTION_EXECUTION_ERROR`. Bounty stays CREATED (correct).
+
+**Exact payload (traced, not guessed):** `fundPrivate`
+(`apps/web/app/bounty/[id]/page.tsx:324`) → `WalletAccountV6`
+`.strk20InvokeTransaction` → wallet method
+`wallet_strk20InvokeTransaction`, network sepolia, 2 actions:
+`[transfer {STRK 0x04718f…, amount OPEN, recipient self},
+invoke {contract VerityAnonymizer 0x04b93a…, calldata
+[FUND_BOUNTY 0x46554e…, bountyId, amount==reward exact, random nonce,
+"${openNoteIds[0]}"]}]`. A safe `[fundPrivate] diagnostic payload` console
+object with exactly these fields was added (no secrets). Nothing simulated,
+no optimistic state, no localStorage writes.
+
+**Eliminated with evidence:** action shape valid per installed
+`types-js@0.10.3` (`STRK20_INVOKE_ACTION` needs no entrypoint; the
+`${openNoteIds[0]}` placeholder is a real wallet-resolved pattern);
+operation felt/arg order match `privacy_invoke`; selector
+`selector!("privacy_invoke")` matches; wiring all MATCH on-chain
+(BM→anon, anon→pool 0x0254…, anon→BM V2, anon class = deployed
+0x495c6e8f…); target bounties (#4–#10) CREATED with exact rewards;
+`fund_bounty` auth/state/amount checks would all pass; starknet.js only
+forwards to the wallet.
+
+**Root cause (proven from the pool's own pinned source
+`starknet-privacy@bc75e4b`, same rev our contracts compile against):**
+the pool applies helper output in `_deposit_to_open_note`
+(`packages/privacy/src/privacy.cairo`) via
+`checked_transfer_from(STRK, sender=helper, recipient=pool, amount)`.
+The canonical helper pattern (`ekubo_swap_anonymizer`) requires a prior
+`withdraw` input leg funding the helper plus `approve(pool)` inside the
+helper. Our tx has NO input leg and our helper never approves. Read live:
+**helper STRK balance = 0, helper→pool allowance = 0.**
+So the pool's backing pull reverts with `INSUFFICIENT_BALANCE` (and/or
+`INSUFFICIENT_ALLOWANCE` per `interface.cairo`) on EVERY attempt,
+deterministically, independent of user balances or paymaster. The inner
+`fund_bounty` bookkeeping would succeed first, then roll back atomically
+— hence CREATED is preserved. Second latent failure: helper screening
+policy reads `Required` (pool default) — custom helpers need governance
+exemption/attestation. Pool fee reads 2 STRK (wallet/paymaster territory,
+not the cause here).
+
+**Verdict: contract-side (A), NOT paymaster-side (B).** The paymaster is
+only the messenger for a correctly-rejected unbacked mint: our FUND path
+manufactures `OpenNoteDeposit{amount}` with zero STRK behind it. No
+frontend-only change can fix it (a `withdraw` leg alone still fails on
+allowance; an `approve` alone still fails on balance). The real fix is a
+funding-model change (input leg + helper approve/escrow + refund path +
+redeploy + audit) — classified as REDESIGN, deliberately NOT implemented
+per instructions. Same structural defect exists in the RELEASE path
+(returns deposits with zero backing). Owner decision required before any
+contract edit.
+
+**To confirm end-to-end on the next attempt:** open console, click Fund
+privately, paste the `[fundPrivate] diagnostic payload` +
+`wallet_strk20InvokeTransaction error` `data`/`full error` lines — expect
+the nested `INSUFFICIENT_BALANCE`/`ALLOWANCE` (or screening) revert, and
+NO transaction hash (failure occurs pre-inclusion).
+
+**Files inspected:** bounty detail `fundPrivate`, `strk20-proof.ts`,
+installed `types-js` components/methods, `verity_anonymizer.cairo`,
+`bounty_manager.cairo` fund path, pool `privacy.cairo`
+(`_apply_invoke_and_deposits`, `_deposit_to_open_note`),
+`ekubo_swap_anonymizer.cairo`, `objects.cairo` (policy default),
+starknet-js WalletAccount docs (3-action shape, OPEN semantics, fee
+behavior). **Changed:** detail page (diagnostic log only) + this §31.
+**Tests:** `tsc` 0, `next build` 7/7, `node --test` 31 pass (unchanged),
+`snforge` 21 pass (unchanged, contracts untouched).
+
 
 
 
