@@ -13,6 +13,7 @@ import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRe
 import {
   OP_STAKE, OP_SUBMIT, OP_REG_PAYOUT, OP_UNSTAKE,
   genesisTip, peekPreimage, consumePreimage, identityShortId, normFelt,
+  chainAt, poseidon1,
   generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity, markIdentityConfirmed,
   evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
   buildUnstakeActions, buildDustAnchorAction, submitGate, fetchInvestigatorState,
@@ -1055,6 +1056,47 @@ export default function BountyDetailPage() {
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const preimage = peekPreimage(local);
+      // Preimage/chain-tip diagnostics (§47.10): prove sync or expose desync
+      // BEFORE the wallet opens. Only hashes + redacted preimage ends reach
+      // the log — the single-use preimage itself never prints in full.
+      try {
+        const tipAbi = [
+          { name: "get_identity_tip", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "tip", type: "core::felt252" }], stateMutability: "view" },
+          { name: "is_identity_registered", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "registered", type: "core::bool" }], stateMutability: "view" },
+        ] as const;
+        const cDiag: any = new Contract({ abi: tipAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+        const [tipRes, regRes]: any = await Promise.all([
+          cDiag.call("get_identity_tip", [local.identity]),
+          cDiag.call("is_identity_registered", [local.identity]),
+        ]);
+        const chainTip = String(tipRes?.tip ?? tipRes?.[0] ?? tipRes ?? "0x0");
+        const regRaw = regRes?.registered ?? regRes?.[0] ?? regRes;
+        const registered = regRaw === true || String(regRaw).toLowerCase() === "true" || ((() => { try { return BigInt(String(regRaw)) !== 0n; } catch { return false; } })());
+        const expectedTip = chainAt(local.seed, local.nextK + 1);
+        const tipMatch = normFelt(expectedTip)?.toLowerCase() === normFelt(chainTip)?.toLowerCase();
+        // Resync hint: walk the LOCAL chain for the on-chain tip. Found at
+        // k*  =>  correct nextK is k*-1. Not found  =>  wrong seed/record.
+        let resyncNextK: number | null = null;
+        try {
+          let v: string = normFelt(local.seed) ?? "";
+          for (let k = 0; k <= 64 && v; k++) {
+            if (v.toLowerCase() === normFelt(chainTip)?.toLowerCase()) { resyncNextK = k - 1; break; }
+            v = poseidon1(v);
+          }
+        } catch {}
+        console.info("[registerPayoutPrivate] preimage diagnostics", {
+          nextK: local.nextK,
+          identity: identityShortId(local.identity),
+          preimageEnds: `${String(preimage).slice(0, 6)}…${String(preimage).slice(-4)}`,
+          expectedTipEnds: `${expectedTip.slice(0, 6)}…${expectedTip.slice(-4)}`,
+          chainTipEnds: `${chainTip.slice(0, 6)}…${chainTip.slice(-4)}`,
+          registered,
+          tipMatch,
+          resyncNextK,
+        });
+      } catch (diagErr: any) {
+        console.warn("[registerPayoutPrivate] preimage diagnostics skipped", diagErr?.message ?? String(diagErr));
+      }
       const actionArray = buildRegPayoutActions({
         helper: CONTRACTS.verityAnonymizer!,
         token: STRK20[NETWORK].strkTokenAddress as Address,
