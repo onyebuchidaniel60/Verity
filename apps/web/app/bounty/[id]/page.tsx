@@ -38,6 +38,7 @@ const OP_RELEASE = "0x52454c45415345"; // 'RELEASE'
 const IDENTITY_ABI = [
   { name: "get_identity_reputation", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "rep", type: "core::integer::u64" }], stateMutability: "view" },
   { name: "is_identity_registered", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "registered", type: "core::bool" }], stateMutability: "view" },
+  { name: "get_identity_tip", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "tip", type: "core::felt252" }], stateMutability: "view" },
   { name: "is_identity_slashed", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "slashed", type: "core::bool" }], stateMutability: "view" },
   { name: "is_identity_eligible", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "eligible", type: "core::bool" }], stateMutability: "view" },
   { name: "get_identity_stake", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "amount", type: "core::integer::u128" }], stateMutability: "view" },
@@ -1141,7 +1142,7 @@ export default function BountyDetailPage() {
         let poolFee: string | null = null;
         try {
           const feeAbi = [
-            { name: "get_fee_amount", type: "function", inputs: [], outputs: [{ name: "fee", type: "core::integer::u256" }], stateMutability: "view" },
+            { name: "get_fee_amount", type: "function", inputs: [], outputs: [{ name: "fee", type: "core::integer::u128" }], stateMutability: "view" },
           ] as const;
           const cFee: any = new Contract({ abi: feeAbi as any, address: POOL!, providerOrAccount: provider });
           const feeRes: any = await cFee.call("get_fee_amount", []);
