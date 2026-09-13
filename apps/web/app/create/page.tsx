@@ -9,7 +9,8 @@ import { createProvider } from "@/lib/starknet";
 import { humanToWei as sharedHumanToWei, formatRewardWei, loadBounty, generateSecret, computeLock, saveBountySecrets, buildCreateBountyCalldata, hexFelt, normalizeContractAddress, buildInvokeCall, toWalletInvokeParams } from "@/lib/bounty";
 import {
   genesisTip, peekCreatorPreimage, buildCreateActions, saveCreator,
-  generateIdentitySeed,
+  generateIdentitySeed, savePendingCreator, clearPendingCreator,
+  pollUntil,
 } from "@/lib/identity-pure";
 import { STRK20 } from "@/lib/strk20";
 
@@ -206,6 +207,20 @@ export default function CreateBountyPage() {
       // Creator alias: fresh seed per bounty, genesis tip is the pseudonym.
       const seed = generateIdentitySeed();
       const alias = genesisTip(seed);
+      // Pending-creator pre-save (§47.9): private creates are relayer-delayed,
+      // so the post-confirmation read-back below can run against pre-inclusion
+      // state. Persist the seed FIRST so a lag-throw never orphans it; the
+      // detail page adopts it once the chain alias matches. Cleared on success.
+      savePendingCreator({ seed, alias, rewardWei, createdAt: Date.now() });
+      const providerPre = createProvider(NETWORK);
+      let countBefore: number | null = null;
+      try {
+        const cb: any = await providerPre.callContract({ contractAddress: CONTRACTS.bountyManager!, entrypoint: "get_bounty_count", calldata: [] });
+        countBefore = Number(cb?.count ?? cb?.[0] ?? cb ?? NaN);
+        if (!Number.isFinite(countBefore)) countBefore = null;
+      } catch {
+        countBefore = null;
+      }
       console.info("[create private] step=invoke CREATE_BOUNTY (pool-routed, no wallet in calldata)");
       const actionArray = buildCreateActions({
         helper: CONTRACTS.verityAnonymizer!,
@@ -237,14 +252,40 @@ export default function CreateBountyPage() {
         }
       }
       const c2 = new Contract({ abi: [{ name: "get_bounty_count", type: "function", inputs: [], outputs: [{ name: "count", type: "core::integer::u64" }], stateMutability: "view" }] as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+      // Relayer-delayed inclusion: poll until the count advances past the
+      // pre-broadcast value instead of trusting a single read (§47.9).
+      if (countBefore !== null) {
+        const advanced = await pollUntil(async () => {
+          try {
+            const rr: any = await c2.call("get_bounty_count", []);
+            return (Number(rr?.count ?? rr) || 0) > countBefore;
+          } catch {
+            return false;
+          }
+        }, 10, 3000);
+        if (!advanced) {
+          throw new Error("Bounty submitted but not yet visible on-chain (relayer delay). Your creator seed is saved on this device — reopen this page shortly and it will pick up automatically. Nothing was lost.");
+        }
+      }
       const r: any = await c2.call("get_bounty_count", []);
       const newId = Number(r?.count ?? r) || null;
       if (!newId) throw new Error("Bounty was not assigned an ID. Check the transaction and try again.");
-      const vm = await loadBounty(provider, newId);
-      if (!vm.creatorAlias || BigInt(vm.creatorAlias).toString(16) !== BigInt(alias).toString(16)) {
-        throw new Error("On-chain alias mismatch — bounty not created as private. Nothing was stored on this device.");
+      // Alias read-back with a short retry (same lag family). The pending
+      // record is KEPT on failure so the seed is never orphaned.
+      let vm: any = null;
+      let aliasOk = false;
+      for (let attempt = 0; attempt < 3 && !aliasOk; attempt++) {
+        try {
+          vm = await loadBounty(provider, newId);
+          aliasOk = !!(vm.creatorAlias && BigInt(vm.creatorAlias).toString(16) === BigInt(alias).toString(16));
+        } catch {}
+        if (!aliasOk && attempt < 2) await new Promise((res) => setTimeout(res, 2500));
+      }
+      if (!aliasOk) {
+        throw new Error(`Bounty #${newId} is not yet readable as private (relayer delay). Your creator seed is saved on this device — open bounty #${newId} shortly and it will pick up automatically. Nothing was lost.`);
       }
       saveCreator(newId, { seed, alias, nextK: 63 });
+      clearPendingCreator();
       try {
         localStorage.setItem(`verity_bounty_${newId}`, JSON.stringify({ title: title.trim(), description: description.trim(), reward, rewardWei, metadataFelt, createdAt: Date.now(), private: true }));
         const idxRaw = localStorage.getItem("verity_bounty_index");

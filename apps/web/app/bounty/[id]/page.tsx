@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { Contract, validateAndParseAddress } from "starknet";
@@ -16,7 +16,9 @@ import {
   generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity, markIdentityConfirmed,
   evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
   buildUnstakeActions, buildDustAnchorAction, submitGate, fetchInvestigatorState,
+  stateDigest,
   peekCreatorPreimage, consumeCreatorPreimage, loadCreator, saveCreator,
+  loadPendingCreator, clearPendingCreator,
   type StoredIdentity, type StoredCreator,
 } from "@/lib/identity-pure";
 
@@ -181,13 +183,21 @@ export default function BountyDetailPage() {
     return null;
   }
 
-  async function load() {
-    setLoading(true);
+  // Last readable-state digest (guard re-poll, §47.9) + unmount guard for
+  // delayed reloads.
+  const digestRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+
+  async function load(quiet = false): Promise<string | null> {
+    if (!quiet) setLoading(true);
     setEligibilityLoaded(false);
     setError(null);
+    const digestParts: Record<string, unknown> = {};
     try {
       const vm = await loadBounty(provider, id);
       setBounty(vm as any);
+      digestParts.bounty = { status: (vm as any)?.status ?? null, rewardWei: (vm as any)?.rewardWei ?? null, funded: (vm as any)?.fundedAmountWei ?? null, winner: (vm as any)?.winner ?? null, winningSub: (vm as any)?.winningSubmission ?? null };
       // TEMP-DIAG: authoritative on-chain values straight from the contract.
       try {
         console.info("[bounty-diag] loaded", {
@@ -229,6 +239,7 @@ export default function BountyDetailPage() {
           } catch {}
         }
         setSubmissions(list);
+        digestParts.subCount = list.length;
         // Load reports for dispute UI
         try {
           const repAbi2 = [{ name: "get_report", type: "function", inputs: [{ name: "bounty_id", type: "core::integer::u64" }, { name: "submission_id", type: "core::integer::u64" }], outputs: [{ type: "bounty_manager::types::Report" }], stateMutability: "view" }] as const;
@@ -245,6 +256,7 @@ export default function BountyDetailPage() {
             } catch {}
           }
           setReportsMap(rMap);
+          digestParts.reportsCount = Object.keys(rMap).length;
         } catch {}
       } catch {}
       // Load stake/reputation if connected
@@ -349,7 +361,18 @@ export default function BountyDetailPage() {
       setEligibilityLoaded(true);
       // Private creator seed for this bounty (device-only; alias match
       // against chain decides creator control — never the wallet).
+      // Pending-creator adoption (§47.9): a create whose read-back lagged
+      // left a pending seed; adopt it now that the chain alias matches.
       try {
+        if (!loadCreator(Number(id))) {
+          const pend = loadPendingCreator();
+          const chainAlias = (vm as any)?.creatorAlias ?? null;
+          if (pend && chainAlias && normFelt(pend.alias)?.toLowerCase() === normFelt(String(chainAlias))?.toLowerCase()) {
+            saveCreator(Number(id), { seed: pend.seed, alias: pend.alias, nextK: 63 });
+            clearPendingCreator();
+            console.info("[bounty-diag] adopted pending creator seed for bounty", id);
+          }
+        }
         setStoredCreator(loadCreator(Number(id)));
       } catch {
         setStoredCreator(null);
@@ -372,14 +395,19 @@ export default function BountyDetailPage() {
           hasPayoutLock: toBool(hasPayout),
           escrowWei: BigInt(escrow?.amount ?? escrow ?? 0),
         });
+        digestParts.locks = { fund: String(hasFund), refund: String(hasRefund), payout: String(hasPayout), escrow: String(BigInt(escrow?.amount ?? escrow ?? 0)) };
       } catch {
         setLocksInfo(null);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return null;
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
+    const digest = stateDigest(digestParts);
+    digestRef.current = digest;
+    return digest;
   }
 
   useEffect(() => {
@@ -474,7 +502,23 @@ export default function BountyDetailPage() {
           // Fall through to reload anyway — load() reads authoritative chain state.
         }
       }
+      const guardBefore = digestRef.current;
       await load();
+      // Relayer-delayed private txs / RPC read lag: the first post-tx read
+      // can still be pre-inclusion state. Re-poll quietly (bounded) until
+      // the readable digest moves (§47.9). Never optimistic — only reads.
+      if (hash) {
+        for (let i = 0; i < 3; i++) {
+          const cur = digestRef.current;
+          if (cur !== null && guardBefore !== null && cur !== guardBefore) break;
+          if (cur !== null && guardBefore === null) break;
+          await new Promise((res) => setTimeout(res, 5000));
+          if (!mountedRef.current) break;
+          try {
+            await load(true);
+          } catch {}
+        }
+      }
     } catch (e: any) {
       const rawMsg = e instanceof Error ? e.message : String(e);
       const msgLower = rawMsg.toLowerCase();

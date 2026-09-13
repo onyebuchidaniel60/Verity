@@ -562,6 +562,79 @@ export function loadCreator(id: number): StoredCreator | null {
   }
 }
 
+// ---- Pending creator (§47.9): pre-broadcast persistence --------------------
+// A private create is relayer-delayed: the single-shot read-back
+// (count → loadBounty → alias check) can run against pre-inclusion state,
+// throw a FALSE "alias mismatch", and orphan the seed (bounties #5/#6).
+// The pending record is written BEFORE the wallet submits, promoted to
+// `verity_creator_<id>` after alias verification, and adopted by the
+// detail page when chain alias matches (same recovery shape as §44
+// pending identities). One outstanding slot is enough (serial creates).
+export interface PendingCreator {
+  seed: string;
+  alias: string;
+  rewardWei: string;
+  createdAt: number;
+}
+
+const PENDING_CREATOR_KEY = "verity_creator_pending";
+
+export function savePendingCreator(s: PendingCreator): void {
+  try {
+    localStorage.setItem(PENDING_CREATOR_KEY, JSON.stringify(s));
+  } catch {}
+}
+
+export function loadPendingCreator(): PendingCreator | null {
+  try {
+    const raw = localStorage.getItem(PENDING_CREATOR_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (typeof p?.seed !== "string" || typeof p?.alias !== "string") return null;
+    if (normFelt(p.alias)?.toLowerCase() !== genesisTip(p.seed).toLowerCase()) return null;
+    return { seed: p.seed, alias: p.alias, rewardWei: String(p.rewardWei ?? ""), createdAt: Number(p.createdAt ?? 0) };
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingCreator(): void {
+  try {
+    localStorage.removeItem(PENDING_CREATOR_KEY);
+  } catch {}
+}
+
+/** Poll `check` until true or tries exhausted (delayMs between tries).
+ *  For post-tx read-after-write lag: capture count BEFORE broadcast, poll
+ *  until it increments. Pure callback shape — node-testable. */
+export function pollUntil(check: () => Promise<boolean>, tries = 10, delayMs = 3000): Promise<boolean> {
+  return (async () => {
+    for (let i = 0; i < tries; i++) {
+      try {
+        if (await check()) return true;
+      } catch {}
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return false;
+  })();
+}
+
+/** Stable, BigInt-safe digest of readable chain state for change detection
+ *  (guard re-poll). Key-order stable; bigints serialized exactly. */
+export function stateDigest(o: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (typeof v === "bigint") return `bigint:${v.toString()}`;
+    if (Array.isArray(v)) return v.map(norm);
+    if (v !== null && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v).sort()) out[k] = norm((v as Record<string, unknown>)[k]);
+      return out;
+    }
+    return v ?? null;
+  };
+  return JSON.stringify(norm(o));
+}
+
 /** Peek at the next creator preimage without consuming. */
 export function peekCreatorPreimage(s: StoredCreator): string {
   if (s.nextK < 0) throw new Error("Creator chain exhausted for this bounty.");

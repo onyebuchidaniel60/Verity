@@ -26,6 +26,11 @@ import {
   buildCreateActions,
   buildDustAnchorAction,
   DUST_TRANSFER_WEI,
+  savePendingCreator,
+  loadPendingCreator,
+  clearPendingCreator,
+  pollUntil,
+  stateDigest,
   verifyOpConstants,
   submitGate,
   fetchInvestigatorState,
@@ -466,5 +471,46 @@ describe("bare-invoke diagnostics (submit/create 114)", () => {
     assert.throws(() => toStarknetCallsFromPrepared(null), /malformed call/);
     assert.throws(() => toStarknetCallsFromPrepared({ contract_address: "0x1" }), /malformed call/);
     assert.throws(() => toStarknetCallsFromPrepared({ contract_address: "0x1", entry_point: "x", calldata: "nope" }), /malformed call/);
+  });
+});
+
+describe("read-after-write lag guards (§47.9)", () => {
+  it("pollUntil passes through on first success (one attempt)", async () => {
+    let n = 0;
+    const ok = await pollUntil(async () => { n++; return true; }, 5, 1);
+    assert.equal(ok, true);
+    assert.equal(n, 1);
+  });
+  it("pollUntil retries then succeeds (lagged count increment)", async () => {
+    let n = 0;
+    const ok = await pollUntil(async () => (++n >= 3), 5, 1);
+    assert.equal(ok, true);
+    assert.equal(n, 3);
+  });
+  it("pollUntil returns false after tries exhausted, swallows throws", async () => {
+    let n = 0;
+    const ok = await pollUntil(async () => { n++; throw new Error("rpc down"); }, 4, 1);
+    assert.equal(ok, false);
+    assert.equal(n, 4);
+  });
+  it("stateDigest is key-order stable, bigint-exact, change-sensitive", () => {
+    const a = stateDigest({ status: "Open", subCount: 1, escrow: 1000000000000000000n });
+    const b = stateDigest({ escrow: 1000000000000000000n, subCount: 1, status: "Open" });
+    assert.equal(a, b);
+    assert.ok(!a.includes("1000000000000000000n"));
+    assert.notEqual(a, stateDigest({ status: "Open", subCount: 2, escrow: 1000000000000000000n }));
+    assert.notEqual(a, stateDigest({ status: "Funded", subCount: 1, escrow: 1000000000000000000n }));
+  });
+  it("pending creator round-trips and rejects tampered alias", () => {
+    clearPendingCreator();
+    assert.equal(loadPendingCreator(), null);
+    savePendingCreator({ seed: "0x1234", alias: genesisTip("0x1234"), rewardWei: "1000000000000000000", createdAt: 1 });
+    const p = loadPendingCreator();
+    assert.equal(p?.rewardWei, "1000000000000000000");
+    assert.equal(p?.alias.toLowerCase(), genesisTip("0x1234").toLowerCase());
+    savePendingCreator({ seed: "0x1234", alias: "0xdead", rewardWei: "1", createdAt: 2 });
+    assert.equal(loadPendingCreator(), null); // integrity: alias must be genesis of seed
+    clearPendingCreator();
+    assert.equal(loadPendingCreator(), null);
   });
 });
