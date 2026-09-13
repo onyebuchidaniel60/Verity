@@ -176,6 +176,14 @@ export interface Strk20Action {
   [k: string]: unknown;
 }
 
+/** Option-A dust anchor (§47.7): shielded 1-wei self-transfer prepended to
+ *  SUBMIT / CREATE / REGISTER_PAYOUT / REFUND action lists so the wallet
+ *  backend has a note-touching leg to assemble/prove. Pool-level only —
+ *  the helper invoke that follows is byte-identical with or without it. */
+export function buildDustAnchorAction(token: string, selfAddress: string): Strk20Action {
+  return { type: "transfer", token, amount: DUST_TRANSFER_WEI, recipient: selfAddress };
+}
+
 export function buildStakeActions(opts: {
   helper: string;
   token: string;
@@ -206,7 +214,7 @@ export function buildSubmitActions(opts: {
     // Option-A dust anchor (§47.7): shielded 1-wei self-transfer so the
     // wallet backend has a note-touching leg. The invoke below is
     // byte-identical to the former bare-invoke shape.
-    { type: "transfer", token: opts.token, amount: DUST_TRANSFER_WEI, recipient: opts.selfAddress },
+    buildDustAnchorAction(opts.token, opts.selfAddress),
     {
       type: "invoke",
       contract: opts.helper,
@@ -224,6 +232,8 @@ export function buildSubmitActions(opts: {
 
 export function buildRegPayoutActions(opts: {
   helper: string;
+  token: string;
+  selfAddress: string;
   bountyId: number;
   payoutLockHex: string;
   preimageHex: string;
@@ -231,6 +241,9 @@ export function buildRegPayoutActions(opts: {
 }): Strk20Action[] {
   const nonce = opts.nonceHex ?? randomNonceHex();
   return [
+    // Option-A dust anchor (§47.8): same pattern as SUBMIT/CREATE. The
+    // invoke below is byte-identical to the former bare-invoke shape.
+    buildDustAnchorAction(opts.token, opts.selfAddress),
     {
       type: "invoke",
       contract: opts.helper,
@@ -273,9 +286,10 @@ export function buildUnstakeActions(opts: {
 // bare-invoke value is a valid felt, so the discriminator is the absence of
 // any deposit/withdraw/transfer leg — not a malformed field. Since §47.7,
 // SUBMIT and CREATE carry an Option-A dust-transfer prefix (1 wei to self,
-// pool-level only; helper invoke byte-identical). REG_PAYOUT and refund
-// remain bare invokes (refund deferred; register-payout frozen until submit
-// is wallet-proven). The helpers below (a) log the EXACT request sanitized for secrets, (b) classify the
+// pool-level only; helper invoke byte-identical); REGISTER_PAYOUT gained
+// the same prefix in §47.8. Only refund remains a bare invoke (deferred).
+// The helpers below (a) log the EXACT request sanitized for secrets,
+// (b) classify the
 // 114 error across wallet error shapes, (c) map a prepared call back to
 // starknet.js shape for the spec-sanctioned prepare -> addInvokeTransaction
 // two-step path (`executeWithProof`), which needs NO contract change.
@@ -577,7 +591,7 @@ export function buildCreateActions(opts: {
 }): Strk20Action[] {
   const nonce = opts.nonceHex ?? randomNonceHex();
   return [
-    { type: "transfer", token: opts.token, amount: DUST_TRANSFER_WEI, recipient: opts.selfAddress },
+    buildDustAnchorAction(opts.token, opts.selfAddress),
     {
       type: "invoke",
       contract: opts.helper,

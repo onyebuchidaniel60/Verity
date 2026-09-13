@@ -24,6 +24,7 @@ import {
   buildRegPayoutActions,
   buildUnstakeActions,
   buildCreateActions,
+  buildDustAnchorAction,
   DUST_TRANSFER_WEI,
   verifyOpConstants,
   submitGate,
@@ -143,8 +144,11 @@ describe("STRK20 action slot shapes", () => {
     assert.equal(BigInt(cd[5]).toString(16), BigInt(VECTORS["0x1234"].c63).toString(16));
   });
 
-  it("REG_PAYOUT: [invoke(REG, bid, 0, nonce, lock, preimage)]", () => {
-    const [inv] = buildRegPayoutActions({ helper, bountyId: 5, payoutLockHex: "0x9a910c4", preimageHex: VECTORS["0x1234"].c62, nonceHex: "0x3" });
+  it("REG_PAYOUT: [transfer dust→self, invoke(REG, bid, 0, nonce, lock, preimage)]", () => {
+    const [dust, inv] = buildRegPayoutActions({ helper, token, selfAddress: "0xabc", bountyId: 5, payoutLockHex: "0x9a910c4", preimageHex: VECTORS["0x1234"].c62, nonceHex: "0x3" });
+    assert.equal(dust.type, "transfer");
+    assert.equal((dust as any).amount, DUST_TRANSFER_WEI);
+    assert.equal((dust as any).recipient, "0xabc");
     const cd = (inv as any).calldata as string[];
     assert.equal(cd[0].toLowerCase(), OP_REG_PAYOUT.toLowerCase());
     assert.equal(cd[1], "0x5");
@@ -176,7 +180,7 @@ describe("STRK20 action slot shapes", () => {
     const actions = [
       ...buildStakeActions({ helper, token, stakeWei, identityHex: identity }),
       ...buildSubmitActions({ helper, token, selfAddress: "0xabc", bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63 }),
-      ...buildRegPayoutActions({ helper, bountyId: 5, payoutLockHex: "0x9a910c4", preimageHex: VECTORS["0x1234"].c62 }),
+      ...buildRegPayoutActions({ helper, token, selfAddress: "0xabc", bountyId: 5, payoutLockHex: "0x9a910c4", preimageHex: VECTORS["0x1234"].c62 }),
     ];
     for (const a of actions) {
       for (const item of ((a as any).calldata ?? [(a as any).amount]) as string[]) {
@@ -428,6 +432,25 @@ describe("bare-invoke diagnostics (submit/create 114)", () => {
     assert.equal(s[0].amount, DUST_TRANSFER_WEI);
     assert.equal(s[1].type, "invoke");
     assert.deepEqual(s[1].calldata!.map((c) => c.value), [OP_SUBMIT, "0x3", "0x0", "0x2", "0x6576", "<secret-redacted>"]);
+  });
+  it("dust anchor is a 1-wei shielded self-transfer (no calldata, no extra keys)", () => {
+    const d = buildDustAnchorAction("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d", "0xabc");
+    assert.deepEqual(d, { type: "transfer", token: "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d", amount: "0x1", recipient: "0xabc" });
+    const [logged] = sanitizeStrk20ActionsForLog([d]);
+    assert.deepEqual(logged.extraKeys, []);
+    assert.equal(logged.amount, "0x1");
+  });
+  it("refund pattern is [dust transfer, invoke(6-slot)] with byte-identical invoke", () => {
+    const OP_REFUND = "0x524546554e445f424f554e5459"; // 'REFUND_BOUNTY' (page-owned const, mirrored)
+    const actions = [
+      buildDustAnchorAction("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d", "0xabc"),
+      { type: "invoke", contract: "0x03602dc4", calldata: [OP_REFUND, "0x3", "0x0", "0x9", "0x0", "0x1234"] },
+    ];
+    const s = sanitizeStrk20ActionsForLog(actions);
+    assert.equal(s.length, 2);
+    assert.equal(s[0].type, "transfer");
+    assert.equal(s[1].type, "invoke");
+    assert.deepEqual(s[1].calldata!.map((c) => c.value), [OP_REFUND, "0x3", "0x0", "0x9", "0x0", "<secret-redacted>"]);
   });
   it("prepared-call mapping round-trips wallet shape to starknet shape", () => {
     const calls = toStarknetCallsFromPrepared({

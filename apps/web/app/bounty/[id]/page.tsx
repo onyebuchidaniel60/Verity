@@ -15,7 +15,7 @@ import {
   genesisTip, peekPreimage, consumePreimage, identityShortId, normFelt,
   generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity, markIdentityConfirmed,
   evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
-  buildUnstakeActions, submitGate, fetchInvestigatorState,
+  buildUnstakeActions, buildDustAnchorAction, submitGate, fetchInvestigatorState,
   peekCreatorPreimage, consumeCreatorPreimage, loadCreator, saveCreator,
   type StoredIdentity, type StoredCreator,
 } from "@/lib/identity-pure";
@@ -1007,17 +1007,19 @@ export default function BountyDetailPage() {
       if (!secret) secret = generateSecret();
       const { computeLock: lockOf } = await import("@/lib/bounty");
       const lock = lockOf(secret);
-      const { wallet } = await connectWallet();
+      const { wallet, address } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const preimage = peekPreimage(local);
       const actionArray = buildRegPayoutActions({
         helper: CONTRACTS.verityAnonymizer!,
+        token: STRK20[NETWORK].strkTokenAddress as Address,
+        selfAddress: address,
         bountyId: Number(id),
         payoutLockHex: lock,
         preimageHex: preimage,
       });
-      // Bare invoke (no value leg): shared fallback chain logs the request.
+      // Dust-anchored (Option A, §47.8): [transfer 1 wei→self, invoke].
       try {
         const res = await strk20InvokeBareActions({ account, actions: actionArray, logTag: "registerPayoutPrivate", context: { bountyId: Number(id), pool: POOL } });
         const h = res.transaction_hash ?? res.hash;
@@ -1069,7 +1071,7 @@ export default function BountyDetailPage() {
       // Refund secret: stored at creation/lock time, else pasted backup. Never logged.
       const secret = (refundSecretPaste.trim() || getBountySecrets(Number(id))?.refund_secret || "").trim();
       if (!secret) throw new Error("NO_REFUND_SECRET: refund secret not found on this device. Paste your backup refund secret to continue.");
-      const { wallet } = await connectWallet();
+      const { wallet, address } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const bountyId = Number(id);
@@ -1079,8 +1081,10 @@ export default function BountyDetailPage() {
       const amountFelt = "0x" + escrowWei.toString(16);
       const nonce = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
       const secretFelt = "0x" + BigInt(secret).toString(16);
-      // Single invoke: escrow returns to the FIXED on-chain creator. No notes.
+      // Dust-anchored (Option A, §47.8): [transfer 1 wei→self, invoke].
+      // The invoke below is byte-identical to the former bare shape.
       const actionArray = [
+        buildDustAnchorAction(STRK20[NETWORK].strkTokenAddress as Address, address),
         { type: "invoke", contract: CONTRACTS.verityAnonymizer!, calldata: [OP_REFUND, bountyIdFelt, amountFelt, nonce, "0x0", secretFelt] } as any,
       ];
       console.info("[refund] diagnostic payload", {
