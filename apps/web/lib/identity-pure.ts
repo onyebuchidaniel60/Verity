@@ -152,6 +152,30 @@ export function peekPreimage(s: StoredIdentity): string {
   return chainAt(s.seed, s.nextK);
 }
 
+/** Derive the correct nextK from an on-chain tip by walking the local
+ *  chain (pure; §47.11). Tip found at c_k  =>  next correct preimage is
+ *  c_{k-1}  =>  nextK = k-1. Returns {found:false} when the tip is nowhere
+ *  in [c_0..c_64] — i.e., a wrong-seed record that callers must NEVER
+ *  silently overwrite (surface "wrong device record" instead). Stale reads
+ *  cannot fake !found (every historical tip is in-walk); k=0 match means
+ *  fully consumed (nextK -1, exhausted — truthful, handle as such). */
+export function deriveNextKFromTip(seedHex: string, chainTipHex: string): { found: boolean; nextK: number | null } {
+  try {
+    const tipN = normFelt(chainTipHex);
+    if (!tipN) return { found: false, nextK: null };
+    const tipL = tipN.toLowerCase();
+    let v = normFelt(seedHex);
+    if (!v) return { found: false, nextK: null };
+    for (let k = 0; k <= IDENTITY_CHAIN_LEN; k++) {
+      if (v.toLowerCase() === tipL) return { found: true, nextK: k - 1 };
+      v = poseidon1(v);
+    }
+    return { found: false, nextK: null };
+  } catch {
+    return { found: false, nextK: null };
+  }
+}
+
 export function randomNonceHex(): string {
   return "0x" + Math.floor(Math.random() * 0xffffffff).toString(16);
 }

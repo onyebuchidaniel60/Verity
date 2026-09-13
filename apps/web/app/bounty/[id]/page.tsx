@@ -13,7 +13,7 @@ import { loadBounty, formatRewardWei, weiToStr, humanToWei, getStatusName, getRe
 import {
   OP_STAKE, OP_SUBMIT, OP_REG_PAYOUT, OP_UNSTAKE,
   genesisTip, peekPreimage, consumePreimage, identityShortId, normFelt,
-  chainAt, poseidon1,
+  chainAt, poseidon1, deriveNextKFromTip,
   generateIdentitySeed, saveIdentity, loadIdentity, clearIdentity, markIdentityConfirmed,
   evidenceToFelt, buildStakeActions, buildSubmitActions, buildRegPayoutActions,
   buildUnstakeActions, buildDustAnchorAction, submitGate, fetchInvestigatorState,
@@ -190,6 +190,26 @@ export default function BountyDetailPage() {
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
 
+  // Silent tip resync (§47.11): heals accepted-then-reverted preimage
+  // desyncs. Applies ONLY when the on-chain tip is found in the local
+  // chain and differs; never overwrites on !found (wrong-record safety).
+  // Idempotent when in sync. Never throws.
+  async function resyncIdentityFromTip(): Promise<void> {
+    try {
+      const rec = loadIdentity();
+      if (!rec || rec.confirmed === false) return;
+      const cRs: any = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
+      const tipR: any = await cRs.call("get_identity_tip", [rec.identity]);
+      const tipStr = String(tipR?.tip ?? tipR?.[0] ?? tipR ?? "0x0");
+      const d = deriveNextKFromTip(rec.seed, tipStr);
+      if (!d.found || d.nextK === null || d.nextK === rec.nextK) return;
+      const fixed = { ...rec, nextK: d.nextK };
+      saveIdentity(fixed);
+      setStoredIdentity(fixed);
+      console.info("[identity-resync] nextK corrected from chain tip", { identity: identityShortId(rec.identity), from: rec.nextK, to: d.nextK });
+    } catch {}
+  }
+
   async function load(quiet = false): Promise<string | null> {
     if (!quiet) setLoading(true);
     setEligibilityLoaded(false);
@@ -268,7 +288,8 @@ export default function BountyDetailPage() {
             { name: "has_stake", type: "function", inputs: [{ name: "account", type: "core::starknet::contract_address::ContractAddress" }], outputs: [{ name: "has", type: "core::bool" }], stateMutability: "view" },
             { name: "is_slashed", type: "function", inputs: [{ name: "account", type: "core::starknet::contract_address::ContractAddress" }], outputs: [{ name: "slashed", type: "core::bool" }], stateMutability: "view" },
             { name: "get_minimum_reputation", type: "function", inputs: [], outputs: [{ name: "min", type: "core::integer::u64" }], stateMutability: "view" },
-            { name: "get_stake_amount", type: "function", inputs: [], outputs: [{ name: "amt", type: "core::integer::u128" }], stateMutability: "view" },
+  { name: "get_stake_amount", type: "function", inputs: [], outputs: [{ name: "amt", type: "core::integer::u128" }], stateMutability: "view" },
+  { name: "get_identity_tip", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "tip", type: "core::felt252" }], stateMutability: "view" },
           ] as const;
           const c2 = new Contract({ abi: repAbi as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
           const [repRes, stakeRes, slashedRes, minRes, amtRes]: any = await Promise.all([
@@ -360,6 +381,9 @@ export default function BountyDetailPage() {
       // Eligibility reads (legacy + private) attempted above — chain is the
       // only source of staked-ness. Submit stays disabled until this is set.
       setEligibilityLoaded(true);
+      // Silent tip resync on every load (§47.11): heals desyncs from
+      // accepted-then-reverted txs or replaced records.
+      await resyncIdentityFromTip();
       // Private creator seed for this bounty (device-only; alias match
       // against chain decides creator control — never the wallet).
       // Pending-creator adoption (§47.9): a create whose read-back lagged
@@ -492,12 +516,17 @@ export default function BountyDetailPage() {
     setTxHash(null);
     try {
       const hash = await fn();
+      // Inclusion confirmation drives the post-tx resync below: only a
+      // CONFIRMED tx proves the chain tip moved. Unknown (wait-warning)
+      // skips resync to avoid stale-read clobber.
+      let confirmed = false;
       if (hash) {
         setTxHash(hash);
         // FUNDED/OPEN/etc only after actual L2 confirmation — never optimistic.
         // Wait briefly for the tx to be accepted before reloading chain state.
         try {
           await provider.waitForTransaction(hash as string, { retryInterval: 2000, successStates: ["ACCEPTED_ON_L2", "ACCEPTED_ON_L1"] } as any);
+          confirmed = true;
         } catch (waitErr) {
           console.warn(`[bounty ${id}] waitForTransaction warning for ${key}`, waitErr);
           // Fall through to reload anyway — load() reads authoritative chain state.
@@ -520,7 +549,19 @@ export default function BountyDetailPage() {
           } catch {}
         }
       }
+      // Post-confirmation tip re-derive (§47.11): re-derive nextK from the
+      // on-chain tip instead of trusting the acceptance-time decrement.
+      if (confirmed) {
+        try {
+          await resyncIdentityFromTip();
+        } catch {}
+      }
     } catch (e: any) {
+      // Best-effort heal on failure too: pre-acceptance failures are no-ops
+      // here, accepted-then-reverted ones get corrected back.
+      try {
+        await resyncIdentityFromTip();
+      } catch {}
       const rawMsg = e instanceof Error ? e.message : String(e);
       const msgLower = rawMsg.toLowerCase();
       console.error(`[bounty ${id}] ${key} failed`, e);
@@ -1059,6 +1100,8 @@ export default function BountyDetailPage() {
       // Preimage/chain-tip diagnostics (§47.10): prove sync or expose desync
       // BEFORE the wallet opens. Only hashes + redacted preimage ends reach
       // the log — the single-use preimage itself never prints in full.
+      let diagChainTip: string | null = null;
+      let diagRegistered: boolean | null = null;
       try {
         const tipAbi = [
           { name: "get_identity_tip", type: "function", inputs: [{ name: "identity", type: "core::felt252" }], outputs: [{ name: "tip", type: "core::felt252" }], stateMutability: "view" },
@@ -1072,6 +1115,8 @@ export default function BountyDetailPage() {
         const chainTip = String(tipRes?.tip ?? tipRes?.[0] ?? tipRes ?? "0x0");
         const regRaw = regRes?.registered ?? regRes?.[0] ?? regRes;
         const registered = regRaw === true || String(regRaw).toLowerCase() === "true" || ((() => { try { return BigInt(String(regRaw)) !== 0n; } catch { return false; } })());
+        diagChainTip = chainTip;
+        diagRegistered = registered;
         const expectedTip = chainAt(local.seed, local.nextK + 1);
         const tipMatch = normFelt(expectedTip)?.toLowerCase() === normFelt(chainTip)?.toLowerCase();
         // Resync hint: walk the LOCAL chain for the on-chain tip. Found at
@@ -1096,6 +1141,16 @@ export default function BountyDetailPage() {
         });
       } catch (diagErr: any) {
         console.warn("[registerPayoutPrivate] preimage diagnostics skipped", diagErr?.message ?? String(diagErr));
+      }
+      // Fail fast on a PROVEN wrong record (§47.11): registered on-chain but
+      // the tip is nowhere in this device's chain — submission would burn a
+      // fee reverting. Stale reads cannot fake this (every historical tip is
+      // in-walk); skipped reads never block (nulls).
+      if (diagRegistered === true && diagChainTip) {
+        const chk = deriveNextKFromTip(local.seed, diagChainTip);
+        if (!chk.found) {
+          throw new Error("WRONG_DEVICE_RECORD: this device's investigator record does not match any on-chain identity for the winner. Register from the device/browser that staked and submitted — compare the eligibility short-id with the winner. Nothing was submitted.");
+        }
       }
       const actionArray = buildRegPayoutActions({
         helper: CONTRACTS.verityAnonymizer!,

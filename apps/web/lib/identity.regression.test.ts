@@ -31,6 +31,7 @@ import {
   clearPendingCreator,
   pollUntil,
   stateDigest,
+  deriveNextKFromTip,
   verifyOpConstants,
   submitGate,
   fetchInvestigatorState,
@@ -512,5 +513,34 @@ describe("read-after-write lag guards (§47.9)", () => {
     assert.equal(loadPendingCreator(), null); // integrity: alias must be genesis of seed
     clearPendingCreator();
     assert.equal(loadPendingCreator(), null);
+  });
+});
+
+describe("tip resync (§47.11)", () => {
+  const seed = "0x1234";
+  const V = VECTORS[seed]; // c62/c63/c64 constants shared with snforge
+  it("stuck-at-63 with tip advanced once derives 62 (production case)", () => {
+    const stored = 63;
+    const d = deriveNextKFromTip(seed, V.c63);
+    assert.deepEqual(d, { found: true, nextK: 62 });
+    assert.notEqual(d.nextK, stored); // caller WOULD persist the correction
+  });
+  it("already-correct record derives its own nextK (no write)", () => {
+    const stored = 62;
+    const d = deriveNextKFromTip(seed, V.c63);
+    assert.deepEqual(d, { found: true, nextK: 62 });
+    assert.equal(d.nextK, stored); // caller changes nothing
+  });
+  it("over-advanced record derives back up (spurious consume heals)", () => {
+    const stored = 61;
+    const d = deriveNextKFromTip(seed, V.c63);
+    assert.deepEqual(d, { found: true, nextK: 62 });
+    assert.notEqual(d.nextK, stored); // caller WOULD persist the correction
+  });
+  it("fresh chain derives 63 (genesis tip, no-op)", () => {
+    assert.deepEqual(deriveNextKFromTip(seed, V.c64), { found: true, nextK: 63 });
+  });
+  it("unknown tip yields not-found (caller must NOT overwrite)", () => {
+    assert.deepEqual(deriveNextKFromTip(seed, "0xdeadbeef"), { found: false, nextK: null });
   });
 });
