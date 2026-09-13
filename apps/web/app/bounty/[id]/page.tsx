@@ -195,21 +195,42 @@ export default function BountyDetailPage() {
   // Silent tip resync (§47.11): heals accepted-then-reverted preimage
   // desyncs. Applies ONLY when the on-chain tip is found in the local
   // chain and differs; never overwrites on !found (wrong-record safety).
-  // Idempotent when in sync. Never throws.
-  async function resyncIdentityFromTip(): Promise<void> {
+  // Idempotent when in sync. Never throws. Every exit path is logged
+  // (§47.13) so a missing apply is diagnosable from the console.
+  async function resyncIdentityFromTip(source: string = "page-load"): Promise<void> {
     try {
       const rec = loadIdentity();
-      if (!rec || rec.confirmed === false) return;
+      if (!rec) {
+        console.info("[identity-resync] skipped (no local record)", { source });
+        return;
+      }
+      if (rec.confirmed === false) {
+        console.info("[identity-resync] skipped-unconfirmed", { source, identity: identityShortId(rec.identity), confirmed: rec.confirmed, nextK: rec.nextK });
+        return;
+      }
       const cRs: any = new Contract({ abi: IDENTITY_ABI as any, address: CONTRACTS.bountyManager!, providerOrAccount: provider });
       const tipR: any = await cRs.call("get_identity_tip", [rec.identity]);
       const tipStr = String(tipR?.tip ?? tipR?.[0] ?? tipR ?? "0x0");
       const d = deriveNextKFromTip(rec.seed, tipStr);
-      if (!d.found || d.nextK === null || d.nextK === rec.nextK) return;
+      if (!d.found || d.nextK === null) {
+        console.info("[identity-resync] not-found (tip not in local chain — wrong device record?)", { source, identity: identityShortId(rec.identity), nextK: rec.nextK, tipEnds: `${tipStr.slice(0, 6)}…${tipStr.slice(-4)}` });
+        return;
+      }
+      if (d.nextK === rec.nextK) {
+        console.info("[identity-resync] in-sync", { source, identity: identityShortId(rec.identity), nextK: rec.nextK });
+        return;
+      }
+      const before = rec.nextK;
       const fixed = { ...rec, nextK: d.nextK };
       saveIdentity(fixed);
       setStoredIdentity(fixed);
-      console.info("[identity-resync] nextK corrected from chain tip", { identity: identityShortId(rec.identity), from: rec.nextK, to: d.nextK });
-    } catch {}
+      // Readback proves the write landed (storageKey mirrors IDENTITY_KEY
+      // in lib/identity-pure.ts).
+      const after = loadIdentity()?.nextK ?? null;
+      console.info("[identity-resync] applied", { source, identity: identityShortId(rec.identity), before, computed: d.nextK, after, storageKey: "verity_identity" });
+    } catch (e: any) {
+      console.warn("[identity-resync] error", { source, message: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   async function load(quiet = false): Promise<string | null> {
@@ -566,14 +587,14 @@ export default function BountyDetailPage() {
       // on-chain tip instead of trusting the acceptance-time decrement.
       if (confirmed) {
         try {
-          await resyncIdentityFromTip();
+          await resyncIdentityFromTip("post-tx");
         } catch {}
       }
     } catch (e: any) {
       // Best-effort heal on failure too: pre-acceptance failures are no-ops
       // here, accepted-then-reverted ones get corrected back.
       try {
-        await resyncIdentityFromTip();
+        await resyncIdentityFromTip("failure");
       } catch {}
       const rawMsg = e instanceof Error ? e.message : String(e);
       const msgLower = rawMsg.toLowerCase();
@@ -1111,6 +1132,31 @@ export default function BountyDetailPage() {
       const { wallet, address } = await connectWallet();
       await ensureConnected();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
+      // Shielded-balance read (§47.13): rule out a fee-side rejection on
+      // the same click. Read-only; never blocks register. Pool fee has no
+      // existing frontend read path, so it is best-effort in try/catch.
+      try {
+        const sBal: any = await account.strk20Balances([STRK20[NETWORK].strkTokenAddress as Address]);
+        const sEntry = (sBal as any[]).find((b: any) => String(b.token).toLowerCase() === STRK20[NETWORK].strkTokenAddress.toLowerCase());
+        let poolFee: string | null = null;
+        try {
+          const feeAbi = [
+            { name: "get_fee_amount", type: "function", inputs: [], outputs: [{ name: "fee", type: "core::integer::u256" }], stateMutability: "view" },
+          ] as const;
+          const cFee: any = new Contract({ abi: feeAbi as any, address: POOL!, providerOrAccount: provider });
+          const feeRes: any = await cFee.call("get_fee_amount", []);
+          poolFee = String(feeRes?.fee ?? feeRes?.amount ?? feeRes?.[0] ?? feeRes ?? "");
+        } catch (feeErr: any) {
+          poolFee = `unreadable (${feeErr instanceof Error ? feeErr.message : String(feeErr)})`;
+        }
+        console.info("[registerPayoutPrivate] shielded-balance", {
+          token: STRK20[NETWORK].strkTokenAddress,
+          balance: sEntry ? String(sEntry.balance) : "(no entry)",
+          poolFee,
+        });
+      } catch (balErr: any) {
+        console.warn("[registerPayoutPrivate] shielded-balance skipped", balErr?.message ?? String(balErr));
+      }
       const preimage = peekPreimage(local);
       // Preimage/chain-tip diagnostics (§47.10): prove sync or expose desync
       // BEFORE the wallet opens. Only hashes + redacted preimage ends reach
@@ -1146,6 +1192,7 @@ export default function BountyDetailPage() {
         } catch {}
         console.info("[registerPayoutPrivate] preimage diagnostics", {
           nextK: local.nextK,
+          confirmed: local.confirmed !== false,
           identity: identityShortId(local.identity),
           preimageEnds: `${String(preimage).slice(0, 6)}…${String(preimage).slice(-4)}`,
           expectedTipEnds: `${expectedTip.slice(0, 6)}…${expectedTip.slice(-4)}`,
