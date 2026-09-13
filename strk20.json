@@ -332,6 +332,6 @@
     }
   ],
   "demo_video": "",
-  "demo_url": "",
+  "demo_url": "https://web-jade-xi-79.vercel.app",
   "notes": "Sepolia V3 (private staking + creator alias, 2026-09-07): BountyManager 0x04315e84... (class 0x448d5070...) + VerityAnonymizer 0x03602dc4... (class 0x07977502...) + pool 0x0254..., wired both ways, all 6 txs ACCEPTED_ON_L2 (total fees ~87.07 STRK). Frontend CONTRACTS points at V3. Old V2 contracts (BM 0x03643a..., helper 0x07aa8479...) superseded. Private staking test with real wallet signing still pending (see docs/AI_HANDOFF.md). Mainnet pending."
 }
