@@ -15,8 +15,13 @@ target/
 
 # Environment / secrets
 .env
+.env.*
+!.env.example
 .env.local
 .env.*.local
+
+# Vercel local state
+.vercel/
 
 # Logs + temp
 *.log
