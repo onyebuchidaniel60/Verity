@@ -20,6 +20,8 @@ import {
   stateDigest,
   peekCreatorPreimage, consumeCreatorPreimage, loadCreator, saveCreator,
   loadPendingCreator, clearPendingCreator,
+  splitTextToFelts, joinFeltsToText,
+  saveEvidenceDraft, loadEvidenceDraft, clearEvidenceDraft,
   type StoredIdentity, type StoredCreator,
 } from "@/lib/identity-pure";
 
@@ -258,6 +260,17 @@ export default function BountyDetailPage() {
               : subRaw;
             list.push({ id: i, ...sub });
           } catch {}
+        }
+        // Option A evidence text (on-chain chunks; null = hash-only legacy
+        // or unpublished — also null pre-redeploy while the view is absent).
+        for (const item of list) {
+          try {
+            const ev: any = await cSub.call("get_submission_evidence", [id, (item as any).id]);
+            const arr: any[] = Array.isArray(ev) ? ev : [];
+            (item as any).evidenceText = arr.length ? joinFeltsToText(arr) : null;
+          } catch {
+            (item as any).evidenceText = null;
+          }
         }
         setSubmissions(list);
         digestParts.subCount = list.length;
@@ -796,6 +809,7 @@ export default function BountyDetailPage() {
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
       // Convert evidence string to felt (short string, truncate)
       const evidenceFelt = evidence.trim().slice(0, 31) ? "0x" + Buffer.from(evidence.trim().slice(0, 31)).toString("hex") : "0x1";
+      saveEvidenceDraft(Number(id), evidence);
       return publicInvoke(account, CONTRACTS.bountyManager, "submit_investigation", [id, evidenceFelt], "submit");
     });
 
@@ -1046,6 +1060,7 @@ export default function BountyDetailPage() {
       const { wallet, address } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const evidenceFelt = evidenceToFelt(evidence);
+      saveEvidenceDraft(Number(id), evidence);
       const preimage = peekPreimage(local);
       const actionArray = buildSubmitActions({
         helper: CONTRACTS.verityAnonymizer!,
@@ -1259,6 +1274,45 @@ export default function BountyDetailPage() {
       const lock = computeLock(secret);
       const h = await publicInvoke(account, CONTRACTS.verityAnonymizer, "register_payout_lock", [id, lock], "register");
       savePayoutSecret(Number(id), secret);
+      return h;
+    });
+
+  // Option A evidence publish (§47.12): public text, private author.
+  // Direct call (challenge pattern): content is public by design, so no
+  // pool leg and no pool fee. Private submissions retire a chain preimage
+  // (consumed — never reuse it); legacy uses caller==investigator auth.
+  // Sender IS visible: publish from a fresh account for unlinkability.
+  const publishEvidenceText = (submissionId: number) =>
+    guard("publish", async () => {
+      const sub = submissions.find((s: any) => Number(s.id) === submissionId);
+      if (!sub) throw new Error("Submission not loaded — reload and try again.");
+      const text = (evidence.trim() || loadEvidenceDraft(Number(id)) || "").trim();
+      if (!text) throw new Error("Evidence text not found on this device — type it again to publish.");
+      const chunks = splitTextToFelts(text);
+      const subIdentity = (() => { try { const n = normFelt(String((sub as any)?.identity ?? "")); return n && BigInt(n) !== 0n ? n : null; } catch { return null; } })();
+      const { wallet } = await connectWallet();
+      await ensureConnected();
+      const account: any = await createStrk20Account(wallet, { network: NETWORK, token: "" as any });
+      const fx = (v: string | number | bigint) => "0x" + BigInt(String(v)).toString(16);
+      let preimageHex = "0x0";
+      let localRec: StoredIdentity | null = null;
+      if (subIdentity) {
+        localRec = loadIdentity();
+        if (!localRec) throw new Error("Identity not found on this device — publish from the device holding the investigator identity.");
+        preimageHex = peekPreimage(localRec);
+      }
+      const bmAddr = normalizeContractAddress(CONTRACTS.bountyManager, "BountyManager");
+      // Span<felt252> serializes length-prefixed: [bid, sid, len, ...chunks, preimage].
+      const calldata = [fx(id), fx(submissionId), fx(chunks.length), ...chunks.map((c) => fx(c)), fx(preimageHex)];
+      console.info("[publish] wallet_addInvokeTransaction params", { contract: bmAddr, entrypoint: "publish_evidence", bountyId: Number(id), submissionId, chunkCount: chunks.length });
+      const res: any = await account.execute([{ contractAddress: bmAddr, entrypoint: "publish_evidence", calldata }]);
+      const h = res.transaction_hash ?? res.hash;
+      if (subIdentity && localRec) {
+        const { next } = consumePreimage(localRec);
+        setStoredIdentity(next);
+      }
+      clearEvidenceDraft(Number(id));
+      console.info("[publish] wallet response", res);
       return h;
     });
 
@@ -1928,7 +1982,7 @@ export default function BountyDetailPage() {
                     <div style={{ textAlign: "right", fontSize: 11, color: "var(--text-muted)" }}>{shortAddr(invHex)}</div>
                   </div>
                   <div style={{ fontSize: 12, color: "var(--text-secondary)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8, wordBreak: "break-all" }}>
-                    {String(s.evidence_hash).slice(0, 64)}…
+                    {String((s as any).evidenceText ?? "").length > 0 ? String((s as any).evidenceText).slice(0, 280) : `${String(s.evidence_hash).slice(0, 64)}…`}
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                     {isCreator && isOpen && statusLabel === "Pending" && (
@@ -1980,6 +2034,11 @@ export default function BountyDetailPage() {
                         })()}
                       </span>
                     )}
+                    {!(s as any).evidenceText && isOwn && (
+                      <button disabled={!!busy} onClick={() => publishEvidenceText(Number(s.id))} className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: 12 }} title="Evidence text is public on-chain; only your commitment stays private. Publishing is a public transaction — use a fresh account for full unlinkability.">
+                        {busy === "publish" ? "Publishing…" : "Publish evidence text (public)"}
+                      </button>
+                    )}
                     <button onClick={() => setSelectedSubmission(selectedSubmission === Number(s.id) ? null : Number(s.id))} className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12 }}>
                       {selectedSubmission === Number(s.id) ? "Hide" : "Read investigation"}
                     </button>
@@ -1987,7 +2046,7 @@ export default function BountyDetailPage() {
                   {selectedSubmission === Number(s.id) && (
                     <div style={{ marginTop: 10, padding: 10, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
                       <div style={{ fontWeight: 600, marginBottom: 4 }}>Evidence</div>
-                      <div style={{ wordBreak: "break-all", fontFamily: "Fragment Mono", fontSize: 11 }}>{String(s.evidence_hash)}</div>
+                      <div style={{ wordBreak: "break-all", fontFamily: "Fragment Mono", fontSize: 11 }}>{String((s as any).evidenceText ?? s.evidence_hash)}</div>
                       <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>Anonymous submission — investigator identity remains private. Reputation and stake were verified at submission time.</div>
                     </div>
                   )}

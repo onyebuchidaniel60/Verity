@@ -32,6 +32,10 @@ import {
   pollUntil,
   stateDigest,
   deriveNextKFromTip,
+  splitTextToFelts,
+  joinFeltsToText,
+  EVIDENCE_CHUNK_BYTES,
+  MAX_EVIDENCE_CHUNKS,
   verifyOpConstants,
   submitGate,
   fetchInvestigatorState,
@@ -542,5 +546,50 @@ describe("tip resync (§47.11)", () => {
   });
   it("unknown tip yields not-found (caller must NOT overwrite)", () => {
     assert.deepEqual(deriveNextKFromTip(seed, "0xdeadbeef"), { found: false, nextK: null });
+  });
+});
+
+describe("evidence chunking (§47.12, Option A)", () => {
+  it("ascii round-trips exactly", () => {
+    const t = "The vault opens at midnight under the old bridge.";
+    assert.equal(joinFeltsToText(splitTextToFelts(t)), t);
+  });
+  it("multibyte/emoji round-trips exactly", () => {
+    const t = "Résultat 🔍 — 证据确凿 — naïve café";
+    assert.equal(joinFeltsToText(splitTextToFelts(t)), t);
+  });
+  it("31-byte boundary: 31 bytes -> 1 chunk, 32 bytes -> 2 chunks", () => {
+    const a31 = "x".repeat(31);
+    assert.equal(splitTextToFelts(a31).length, 1);
+    assert.equal(joinFeltsToText(splitTextToFelts(a31)), a31);
+    const a32 = "y".repeat(32);
+    assert.equal(splitTextToFelts(a32).length, 2);
+    assert.equal(joinFeltsToText(splitTextToFelts(a32)), a32);
+  });
+  it("every chunk is a valid felt (31 bytes max, 0x-hex)", () => {
+    const felts = splitTextToFelts("Mixed content 123 !@# with Ünïcödé");
+    for (const f of felts) {
+      assert.match(f.toLowerCase(), /^0x(0|[1-9a-f][0-9a-f]{0,62})$/);
+      assert.ok(BigInt(f) < 2n ** 251n + 17n * 2n ** 192n + 1n);
+    }
+  });
+  it("empty text throws; oversize throws", () => {
+    assert.throws(() => splitTextToFelts(""), /empty/);
+    assert.throws(() => splitTextToFelts("z".repeat(MAX_EVIDENCE_CHUNKS * EVIDENCE_CHUNK_BYTES + 1)), /too long/);
+    assert.equal(splitTextToFelts("z".repeat(MAX_EVIDENCE_CHUNKS * EVIDENCE_CHUNK_BYTES)).length, MAX_EVIDENCE_CHUNKS);
+  });
+  it("join accepts bigint/decimal items and tolerates garbage", () => {
+    const felts = splitTextToFelts("abc");
+    const asBig = felts.map((f) => BigInt(f));
+    assert.equal(joinFeltsToText(asBig), "abc");
+    assert.equal(joinFeltsToText([BigInt(felts[0]).toString(10)]), "abc");
+    assert.equal(joinFeltsToText([]), "");
+    assert.equal(typeof joinFeltsToText(["0xzz" as any]), "string");
+  });
+  it("interior zeros survive, trailing padding trims", () => {
+    const t = "a";
+    const felts = splitTextToFelts(t);
+    assert.equal(felts.length, 1);
+    assert.equal(joinFeltsToText(felts), t);
   });
 });

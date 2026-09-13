@@ -186,6 +186,86 @@ export function evidenceToFelt(text: string): string {
   return "0x" + Buffer.from(t).toString("hex");
 }
 
+// ---- Option A evidence chunking (§47.12, public text / private author) ----
+// UTF-8 bytes → 31-byte felt chunks. 31 bytes always fit STARK_PRIME, so
+// every chunk is a valid felt by construction. TextEncoder/TextDecoder are
+// universal (browser + node) — no Buffer dependency for the full text path.
+export const EVIDENCE_CHUNK_BYTES = 31;
+export const MAX_EVIDENCE_CHUNKS = 64;
+
+const HEX_DIGITS = "0123456789abcdef";
+
+function bytesToHex(b: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += HEX_DIGITS[(b[i] >> 4) & 15] + HEX_DIGITS[b[i] & 15];
+  return s;
+}
+
+function hexToBytes(paddedEvenHex: string): Uint8Array {
+  const s = paddedEvenHex.startsWith("0x") ? paddedEvenHex.slice(2) : paddedEvenHex;
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+/** Split evidence text into 0x-hex felt chunks (≤64). Throws on empty/oversize. */
+export function splitTextToFelts(text: string, maxChunks = MAX_EVIDENCE_CHUNKS): string[] {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length === 0) throw new Error("Evidence text is empty");
+  const n = Math.ceil(bytes.length / EVIDENCE_CHUNK_BYTES);
+  if (n > maxChunks) throw new Error(`Evidence too long (${bytes.length} bytes, max ${maxChunks * EVIDENCE_CHUNK_BYTES})`);
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push("0x" + bytesToHex(bytes.slice(i * EVIDENCE_CHUNK_BYTES, (i + 1) * EVIDENCE_CHUNK_BYTES)));
+  }
+  return out;
+}
+
+/** Reassemble felt chunks to text. Accepts hex/bigint/decimal items (chain
+ *  returns bigints); tolerant of garbage (never throws on decode).
+ *  Encoding packs bytes sequentially from the chunk's high side, so a short
+ *  final chunk is TRAILING-zero padded to 31 bytes on decode. */
+export function joinFeltsToText(felts: Array<string | bigint | number>): string {
+  const all: number[] = [];
+  for (const f of felts) {
+    const raw = typeof f === "string" && f.startsWith("0x") ? f.slice(2) : BigInt(f).toString(16);
+    const padded = raw.padEnd(EVIDENCE_CHUNK_BYTES * 2, "0").slice(0, EVIDENCE_CHUNK_BYTES * 2);
+    const b = hexToBytes(padded);
+    for (let i = 0; i < b.length; i++) all.push(b[i]);
+  }
+  let end = all.length;
+  while (end > 0 && all[end - 1] === 0) end--;
+  try {
+    return new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(all.slice(0, end)));
+  } catch {
+    return "";
+  }
+}
+
+// ---- Per-bounty evidence drafts (survive reload until published) -----------
+const evidenceDraftKey = (bountyId: number) => `verity_evidence_draft_${bountyId}`;
+
+export function saveEvidenceDraft(bountyId: number, text: string): void {
+  try {
+    localStorage.setItem(evidenceDraftKey(bountyId), text);
+  } catch {}
+}
+
+export function loadEvidenceDraft(bountyId: number): string | null {
+  try {
+    const raw = localStorage.getItem(evidenceDraftKey(bountyId));
+    return raw && raw.trim() ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearEvidenceDraft(bountyId: number): void {
+  try {
+    localStorage.removeItem(evidenceDraftKey(bountyId));
+  } catch {}
+}
+
 // ---- STRK20 action builders (slot table in docs/PRIVATE_INVESTIGATOR.md) ---
 // privacy_invoke(operation, bounty_id: u64, amount: u128, nonce, note_id, secret)
 

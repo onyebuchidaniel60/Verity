@@ -61,6 +61,10 @@ pub struct Bounty {
 /// submission where `investigator` is the caller's public address. For private
 /// submissions `investigator` holds the identity cast as an address and NO
 /// wallet address is recorded anywhere.
+/// `evidence_len` counts published 31-byte text chunks (Option A, public
+/// evidence / private identity): `0` = hash-only (legacy or unpublished).
+/// Full text lives in `submission_evidence` and is read via
+/// `get_submission_evidence`.
 #[derive(Copy, Drop, Serde, starknet::Store, PartialEq, Debug)]
 pub struct Submission {
     pub id: u64,
@@ -70,6 +74,7 @@ pub struct Submission {
     pub timestamp: u64,
     pub status: SubmissionStatus,
     pub identity: felt252,
+    pub evidence_len: u64,
 }
 
 /// Report for malicious/fraudulent investigation — creator-originated, safeguards against abuse.

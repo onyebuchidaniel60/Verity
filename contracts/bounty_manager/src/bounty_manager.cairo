@@ -22,6 +22,11 @@ pub trait IBountyManager<T> {
     fn submit_evidence(ref self: T, bounty_id: u64, evidence_hash: felt252) -> u64;
     fn get_submission(self: @T, bounty_id: u64, submission_id: u64) -> Submission;
     fn get_submission_count(self: @T, bounty_id: u64) -> u64;
+    // Option A evidence transport (public text, private author): full UTF-8
+    // text as 31-byte felt chunks, published after submission via direct call
+    // (challenge pattern). See `publish_evidence` impl notes.
+    fn publish_evidence(ref self: T, bounty_id: u64, submission_id: u64, chunks: Span<felt252>, preimage: felt252);
+    fn get_submission_evidence(self: @T, bounty_id: u64, submission_id: u64) -> Span<felt252>;
     fn select_winner(ref self: T, bounty_id: u64, submission_id: u64);
     fn get_winner(self: @T, bounty_id: u64) -> ContractAddress;
     fn get_winning_submission(self: @T, bounty_id: u64) -> u64;
@@ -118,6 +123,11 @@ pub trait IStakeHelper<T> {
 /// Each submit / challenge / payout-register / unstake consumes one preimage.
 pub const IDENTITY_CHAIN_LEN: u64 = 64;
 
+/// Maximum 31-byte evidence text chunks per submission (Option A transport).
+/// 64 chunks ≈ 1984 bytes of UTF-8 — enough for MVP investigations, bounded
+/// against gas bombs. Raise only with a fee/DoS review.
+pub const MAX_EVIDENCE_CHUNKS: usize = 64;
+
 /// Cast a private identity commitment to an address for storage in
 /// address-typed fields (Submission.investigator, Bounty.winner) and for the
 /// address-keyed `IReputationProvider` boundary. The value is a pseudonym:
@@ -132,7 +142,7 @@ pub mod BountyManager {
     use core::num::traits::Zero;
     use starknet::{ContractAddress, get_caller_address, get_block_timestamp};
     use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess, StoragePointerWriteAccess};
-    use super::{IBountyManager, IReputationProviderDispatcher, IReputationProviderDispatcherTrait, IStakeHelperDispatcher, IStakeHelperDispatcherTrait, IDENTITY_CHAIN_LEN, identity_to_address};
+    use super::{IBountyManager, IReputationProviderDispatcher, IReputationProviderDispatcherTrait, IStakeHelperDispatcher, IStakeHelperDispatcherTrait, IDENTITY_CHAIN_LEN, MAX_EVIDENCE_CHUNKS, identity_to_address};
     use crate::types::{Bounty, BountyStatus, Submission, SubmissionStatus, Report};
 
     const CHALLENGE_PERIOD: u64 = 259200; // 3 days
@@ -148,6 +158,8 @@ pub mod BountyManager {
         submissions: Map<(u64, u64), Submission>,
         winners: Map<u64, ContractAddress>,
         winning_submissions: Map<u64, u64>,
+        // Option A evidence text chunks: (bounty_id, submission_id, chunk_idx).
+        submission_evidence: Map<(u64, u64, u64), felt252>,
         // Staking
         has_staked: Map<ContractAddress, bool>,
         stake_balances: Map<ContractAddress, u128>,
@@ -210,6 +222,7 @@ pub mod BountyManager {
         PrivatePayoutLockRegistered: PrivatePayoutLockRegistered,
         PrivateBountyCreated: PrivateBountyCreated,
         PayoutAddressSet: PayoutAddressSet,
+        EvidencePublished: EvidencePublished,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -262,6 +275,8 @@ pub mod BountyManager {
     pub struct PrivateBountyCreated { #[key] pub bounty_id: u64, pub creator_alias: felt252, pub reward_amount: u128, pub metadata_hash: felt252 }
     #[derive(Drop, starknet::Event)]
     pub struct PayoutAddressSet { #[key] pub bounty_id: u64, pub payout: ContractAddress }
+    #[derive(Drop, starknet::Event)]
+    pub struct EvidencePublished { #[key] pub bounty_id: u64, #[key] pub submission_id: u64, pub chunks: u64 }
 
     #[constructor]
     fn constructor(ref self: ContractState, owner: ContractAddress) {
@@ -374,7 +389,7 @@ pub mod BountyManager {
             assert(rep >= min_rep, 'REPUTATION_TOO_LOW');
             let count = self.submission_counts.read(bounty_id);
             let submission_id = count + 1;
-            let submission = Submission { id: submission_id, bounty_id, investigator, evidence_hash, timestamp: get_block_timestamp(), status: SubmissionStatus::Pending, identity: 0 };
+            let submission = Submission { id: submission_id, bounty_id, investigator, evidence_hash, timestamp: get_block_timestamp(), status: SubmissionStatus::Pending, identity: 0, evidence_len: 0 };
             self.submissions.write((bounty_id, submission_id), submission);
             self.submission_counts.write(bounty_id, submission_id);
             self.emit(InvestigationSubmitted { bounty_id, submission_id, investigator, evidence_hash });
@@ -383,6 +398,53 @@ pub mod BountyManager {
 
         fn submit_evidence(ref self: ContractState, bounty_id: u64, evidence_hash: felt252) -> u64 {
             self.submit_investigation(bounty_id, evidence_hash)
+        }
+
+        // Option A evidence transport (public text, private author — §47.12).
+        // Direct call (challenge pattern), deliberately NOT pool-routed:
+        // content is public by design, so no privacy leg is needed and no
+        // pool fee applies. Sender IS visible on-chain: investigators who
+        // care about unlinkability should publish from a fresh account
+        // (same operational guidance as challenge_private_report).
+        // Auth: private submissions consume a chain preimage (retiring it —
+        // a NON-consuming reveal would leave it valid for impersonation, so
+        // that shape is explicitly rejected here); legacy submissions check
+        // caller == investigator. First-write-wins (no overwrite, no delete).
+        fn publish_evidence(ref self: ContractState, bounty_id: u64, submission_id: u64, chunks: Span<felt252>, preimage: felt252) {
+            let mut submission = self.submissions.read((bounty_id, submission_id));
+            assert(submission.investigator.is_non_zero(), 'SUBMISSION_NOT_FOUND');
+            assert(submission.evidence_len == 0, 'EVIDENCE_ALREADY_SET');
+            let n = chunks.len();
+            assert(n > 0, 'EVIDENCE_EMPTY');
+            assert(n <= MAX_EVIDENCE_CHUNKS, 'EVIDENCE_TOO_LONG');
+            if submission.identity.is_non_zero() {
+                self._consume_preimage_inner(submission.identity, preimage);
+            } else {
+                assert(get_caller_address() == submission.investigator, 'NOT_INVESTIGATOR');
+            }
+            let mut i: usize = 0;
+            while i < n {
+                let idx: u64 = i.try_into().expect('IDX_OVERFLOW');
+                self.submission_evidence.write((bounty_id, submission_id, idx), *chunks.at(i));
+                i += 1;
+            };
+            let n_u64: u64 = n.try_into().expect('LEN_OVERFLOW');
+            submission.evidence_len = n_u64;
+            self.submissions.write((bounty_id, submission_id), submission);
+            self.emit(EvidencePublished { bounty_id, submission_id, chunks: n_u64 });
+        }
+
+        fn get_submission_evidence(self: @ContractState, bounty_id: u64, submission_id: u64) -> Span<felt252> {
+            let submission = self.submissions.read((bounty_id, submission_id));
+            assert(submission.investigator.is_non_zero(), 'SUBMISSION_NOT_FOUND');
+            let n = submission.evidence_len;
+            let mut out: Array<felt252> = array![];
+            let mut i: u64 = 0;
+            while i < n {
+                out.append(self.submission_evidence.read((bounty_id, submission_id, i)));
+                i += 1;
+            };
+            out.span()
         }
 
         fn get_submission(self: @ContractState, bounty_id: u64, submission_id: u64) -> Submission {
@@ -652,7 +714,7 @@ pub mod BountyManager {
             let count = self.submission_counts.read(bounty_id);
             let submission_id = count + 1;
             let pseudo = identity_to_address(identity);
-            let submission = Submission { id: submission_id, bounty_id, investigator: pseudo, evidence_hash, timestamp: get_block_timestamp(), status: SubmissionStatus::Pending, identity };
+            let submission = Submission { id: submission_id, bounty_id, investigator: pseudo, evidence_hash, timestamp: get_block_timestamp(), status: SubmissionStatus::Pending, identity, evidence_len: 0 };
             self.submissions.write((bounty_id, submission_id), submission);
             self.submission_counts.write(bounty_id, submission_id);
             self.emit(PrivateInvestigationSubmitted { bounty_id, submission_id, identity, evidence_hash });
