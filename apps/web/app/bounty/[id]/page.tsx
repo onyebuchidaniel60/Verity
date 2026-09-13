@@ -957,18 +957,20 @@ export default function BountyDetailPage() {
       if (!local) throw new Error("NOT_STAKED: stake privately first to create your investigator identity.");
       if (!evidence.trim()) throw new Error("Please add investigation details");
       await ensureConnected();
-      const { wallet } = await connectWallet();
+      const { wallet, address } = await connectWallet();
       const account: any = await createStrk20Account(wallet, { network: NETWORK, token: STRK20[NETWORK].strkTokenAddress as Address });
       const evidenceFelt = evidenceToFelt(evidence);
       const preimage = peekPreimage(local);
       const actionArray = buildSubmitActions({
         helper: CONTRACTS.verityAnonymizer!,
+        token: STRK20[NETWORK].strkTokenAddress as Address,
+        selfAddress: address,
         bountyId: Number(id),
         evidenceFelt,
         preimageHex: preimage,
       });
-      // Bare invoke (no value leg): submitted via the shared fallback chain
-      // (direct -> prepare+addInvoke); the helper logs the exact request.
+      // Dust-anchored (Option A, §47.7): [transfer 1 wei→self, invoke].
+      // Submitted via the shared fallback chain (direct -> prepare+addInvoke).
       try {
         const res = await strk20InvokeBareActions({ account, actions: actionArray, logTag: "submitPrivate", context: { bountyId: Number(id), pool: POOL, token: STRK20[NETWORK].strkTokenAddress } });
         const h = res.transaction_hash ?? res.hash;

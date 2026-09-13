@@ -209,14 +209,16 @@ export default function CreateBountyPage() {
       console.info("[create private] step=invoke CREATE_BOUNTY (pool-routed, no wallet in calldata)");
       const actionArray = buildCreateActions({
         helper: CONTRACTS.verityAnonymizer!,
+        token: STRK20[NETWORK].strkTokenAddress as any,
+        selfAddress: address,
         rewardWei,
         metadataFelt,
         aliasHex: alias,
       });
       let hash = "";
       try {
-        // Bare invoke (no value leg): shared fallback chain
-        // (direct -> prepare+addInvoke); the helper logs the exact request.
+        // Dust-anchored (Option A, §47.7): [transfer 1 wei→self, invoke].
+        // Shared fallback chain (direct -> prepare+addInvoke).
         const res = await strk20InvokeBareActions({ account, actions: actionArray, logTag: "create private", context: { pool: STRK20[NETWORK].poolAddress, token: STRK20[NETWORK].strkTokenAddress } });
         hash = res.transaction_hash ?? res.hash ?? "";
         console.info("[create private] accepted via", res.path);

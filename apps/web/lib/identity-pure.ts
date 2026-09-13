@@ -165,6 +165,12 @@ export function evidenceToFelt(text: string): string {
 // ---- STRK20 action builders (slot table in docs/PRIVATE_INVESTIGATOR.md) ---
 // privacy_invoke(operation, bounty_id: u64, amount: u128, nonce, note_id, secret)
 
+/** Dust anchor (1 wei) for the Option-A value-leg prefix (§47.7): a
+ *  shielded self-transfer that gives the wallet backend a note-touching
+ *  leg to assemble/prove while the helper-side invoke stays byte-identical.
+ *  Pool-level only — the helper never sees this leg. Pinned by tests. */
+export const DUST_TRANSFER_WEI = "0x1";
+
 export interface Strk20Action {
   type: string;
   [k: string]: unknown;
@@ -188,6 +194,8 @@ export function buildStakeActions(opts: {
 
 export function buildSubmitActions(opts: {
   helper: string;
+  token: string;
+  selfAddress: string;
   bountyId: number;
   evidenceFelt: string;
   preimageHex: string;
@@ -195,6 +203,10 @@ export function buildSubmitActions(opts: {
 }): Strk20Action[] {
   const nonce = opts.nonceHex ?? randomNonceHex();
   return [
+    // Option-A dust anchor (§47.7): shielded 1-wei self-transfer so the
+    // wallet backend has a note-touching leg. The invoke below is
+    // byte-identical to the former bare-invoke shape.
+    { type: "transfer", token: opts.token, amount: DUST_TRANSFER_WEI, recipient: opts.selfAddress },
     {
       type: "invoke",
       contract: opts.helper,
@@ -259,8 +271,11 @@ export function buildUnstakeActions(opts: {
 // invoke leg paired with a value leg (withdraw/transfer) is accepted
 // (fund, stake). starknet.js forwards `actions` verbatim, and every
 // bare-invoke value is a valid felt, so the discriminator is the absence of
-// any deposit/withdraw/transfer leg — not a malformed field. The helpers
-// below (a) log the EXACT request sanitized for secrets, (b) classify the
+// any deposit/withdraw/transfer leg — not a malformed field. Since §47.7,
+// SUBMIT and CREATE carry an Option-A dust-transfer prefix (1 wei to self,
+// pool-level only; helper invoke byte-identical). REG_PAYOUT and refund
+// remain bare invokes (refund deferred; register-payout frozen until submit
+// is wallet-proven). The helpers below (a) log the EXACT request sanitized for secrets, (b) classify the
 // 114 error across wallet error shapes, (c) map a prepared call back to
 // starknet.js shape for the spec-sanctioned prepare -> addInvokeTransaction
 // two-step path (`executeWithProof`), which needs NO contract change.
@@ -546,11 +561,15 @@ export function consumeCreatorPreimage(s: StoredCreator): { preimage: string; ne
   return { preimage, next: { ...s, nextK: s.nextK - 1 } };
 }
 
-/** CREATE: bare pool-routed invoke (no value leg).
+/** CREATE: dust-anchored pool-routed invoke (Option A, §47.7).
  *  privacy_invoke(CREATE_BOUNTY, bounty_id=0, amount=reward, nonce,
- *                 note_id=metadata_hash, secret=creator_alias). */
+ *                 note_id=metadata_hash, secret=creator_alias). The invoke is
+ *  byte-identical to the former bare shape; the leading dust self-transfer
+ *  is pool-level only (helper never sees it). */
 export function buildCreateActions(opts: {
   helper: string;
+  token: string;
+  selfAddress: string;
   rewardWei: string;
   metadataFelt: string;
   aliasHex: string;
@@ -558,6 +577,7 @@ export function buildCreateActions(opts: {
 }): Strk20Action[] {
   const nonce = opts.nonceHex ?? randomNonceHex();
   return [
+    { type: "transfer", token: opts.token, amount: DUST_TRANSFER_WEI, recipient: opts.selfAddress },
     {
       type: "invoke",
       contract: opts.helper,

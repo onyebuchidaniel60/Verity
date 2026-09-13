@@ -24,6 +24,7 @@ import {
   buildRegPayoutActions,
   buildUnstakeActions,
   buildCreateActions,
+  DUST_TRANSFER_WEI,
   verifyOpConstants,
   submitGate,
   fetchInvestigatorState,
@@ -128,8 +129,12 @@ describe("STRK20 action slot shapes", () => {
     assert.equal(BigInt(cd[5]).toString(16), BigInt(identity).toString(16)); // identity, never a wallet
   });
 
-  it("SUBMIT: [invoke(SUBMIT, bid, 0, nonce, evidence, preimage)]", () => {
-    const [inv] = buildSubmitActions({ helper, bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63, nonceHex: "0x2" });
+  it("SUBMIT: [transfer dust→self, invoke(SUBMIT, bid, 0, nonce, evidence, preimage)]", () => {
+    const [dust, inv] = buildSubmitActions({ helper, token, selfAddress: "0xabc", bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63, nonceHex: "0x2" });
+    assert.equal(dust.type, "transfer");
+    assert.equal((dust as any).token, token);
+    assert.equal((dust as any).amount, DUST_TRANSFER_WEI); // 1 wei anchor, pool-level only
+    assert.equal((dust as any).recipient, "0xabc");
     const cd = (inv as any).calldata as string[];
     assert.equal(cd[0].toLowerCase(), OP_SUBMIT.toLowerCase());
     assert.equal(cd[1], "0x3");
@@ -146,8 +151,11 @@ describe("STRK20 action slot shapes", () => {
     assert.equal(cd[4], "0x9a910c4");
   });
 
-  it("CREATE: [invoke(CREATE, 0, reward, nonce, metadata, alias)]", () => {
-    const [inv] = buildCreateActions({ helper, rewardWei: "10000000000000000000", metadataFelt: "0x1234", aliasHex: VECTORS["0x1"].c64, nonceHex: "0x5" });
+  it("CREATE: [transfer dust→self, invoke(CREATE, 0, reward, nonce, metadata, alias)]", () => {
+    const [dust, inv] = buildCreateActions({ helper, token, selfAddress: "0xabc", rewardWei: "10000000000000000000", metadataFelt: "0x1234", aliasHex: VECTORS["0x1"].c64, nonceHex: "0x5" });
+    assert.equal(dust.type, "transfer");
+    assert.equal((dust as any).amount, DUST_TRANSFER_WEI);
+    assert.equal((dust as any).recipient, "0xabc");
     const cd = (inv as any).calldata as string[];
     assert.equal(cd[0].toLowerCase(), OP_CREATE.toLowerCase());
     assert.equal(cd[1], "0x0");
@@ -167,7 +175,7 @@ describe("STRK20 action slot shapes", () => {
     const feltRe = /^0x(0|[1-9a-f][0-9a-f]{0,62})$/;
     const actions = [
       ...buildStakeActions({ helper, token, stakeWei, identityHex: identity }),
-      ...buildSubmitActions({ helper, bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63 }),
+      ...buildSubmitActions({ helper, token, selfAddress: "0xabc", bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63 }),
       ...buildRegPayoutActions({ helper, bountyId: 5, payoutLockHex: "0x9a910c4", preimageHex: VECTORS["0x1234"].c62 }),
     ];
     for (const a of actions) {
@@ -412,12 +420,14 @@ describe("bare-invoke diagnostics (submit/create 114)", () => {
     assert.equal(invokeCd[3].value, "0x4"); // nonce fully visible
     assert.equal(invokeCd[5].value, "<secret-redacted>"); // preimage hidden
   });
-  it("sanitizer captures the exact failing submit shape (bare invoke)", () => {
-    const sub = buildSubmitActions({ helper: "0x03602dc4", bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63, nonceHex: "0x2" });
+  it("sanitizer captures the dust-anchored submit shape (transfer + invoke)", () => {
+    const sub = buildSubmitActions({ helper: "0x03602dc4", token: "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d", selfAddress: "0xabc", bountyId: 3, evidenceFelt: "0x6576", preimageHex: VECTORS["0x1234"].c63, nonceHex: "0x2" });
     const s = sanitizeStrk20ActionsForLog(sub);
-    assert.equal(s.length, 1); // invoke-only: the rejected shape
-    assert.equal(s[0].type, "invoke");
-    assert.deepEqual(s[0].calldata!.map((c) => c.value), [OP_SUBMIT, "0x3", "0x0", "0x2", "0x6576", "<secret-redacted>"]);
+    assert.equal(s.length, 2); // dust transfer + invoke (Option A, §47.7)
+    assert.equal(s[0].type, "transfer");
+    assert.equal(s[0].amount, DUST_TRANSFER_WEI);
+    assert.equal(s[1].type, "invoke");
+    assert.deepEqual(s[1].calldata!.map((c) => c.value), [OP_SUBMIT, "0x3", "0x0", "0x2", "0x6576", "<secret-redacted>"]);
   });
   it("prepared-call mapping round-trips wallet shape to starknet shape", () => {
     const calls = toStarknetCallsFromPrepared({
